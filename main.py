@@ -122,22 +122,19 @@ class NewClient(BaseModel):
 
 
 # priority removed — waitlist-only, always defaulted to 1 by DB
+VALID_DOCTORS = {"Dr. J Pork", "Dr. James", "Dr. Mike"}
+
+
 class NewAppointment(BaseModel):
     reason_of_appointment: str
     appointment_at: str
     doctor_name: str
 
-    @field_validator("appointment_at")
+    @field_validator("doctor_name")
     @classmethod
-    def valid_datetime(cls, v: str) -> str:
-        try:
-            dt = datetime.strptime(v, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            raise ValueError(
-                'appointment_at must be format "YYYY-MM-DD HH:MM:SS", e.g. "2026-06-10 14:00:00"'
-            )
-        if dt < datetime.now() + timedelta(hours=1):
-            raise ValueError("Appointment must be booked at least 1 hour from now")
+    def doctor_must_be_valid(cls, v: str) -> str:
+        if v not in VALID_DOCTORS:
+            raise ValueError(f"doctor_name must be one of: {', '.join(VALID_DOCTORS)}")
         return v
 
 
