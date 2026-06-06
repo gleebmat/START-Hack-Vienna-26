@@ -1,15 +1,22 @@
 from datetime import datetime, timedelta
-import os
 from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, field_validator
 from typing import Optional
 import psycopg
 import hashlib
+import os
 import httpx
+from dotenv import load_dotenv
 
+
+load_dotenv()
 app = FastAPI(title="Dental clinic system")
 security = HTTPBasic()
+
+
+# ── Configuration ──────────────────────────────────────────────
+FONIO_API_KEY = os.environ.get("FONIO_API_KEY")
 
 
 # ── DB connection ──────────────────────────────────────────────
@@ -53,7 +60,16 @@ def require_client(
     return {"client_id": row[0], "name": row[1], "phone": row[2]}
 
 
+# ── Fonio call ─────────────────────────────────────────────────
 def trigger_fonio_call(candidate: dict, cancelled_appointment: dict):
+    raw_time = cancelled_appointment["appointment_at"]
+    try:
+        human_time = datetime.strptime(raw_time, "%Y-%m-%d %H:%M:%S").strftime(
+            "%B %d at %I:%M %p"
+        )
+    except ValueError:
+        human_time = raw_time
+
     payload = {
         "fromNumber": "+436767563950",
         "toNumber": candidate["phone"],
@@ -61,14 +77,16 @@ def trigger_fonio_call(candidate: dict, cancelled_appointment: dict):
         "context": {
             "patient_name": candidate["name"],
             "reason": cancelled_appointment["reason_of_appointment"],
-            "slot_time": cancelled_appointment["appointment_at"],
+            "doctor": cancelled_appointment.get("doctor_name", "TBD"),
+            "slot_time": human_time,
+            "slot_time_db": raw_time,
         },
     }
-    try:
+    try:  # ← payload IS used here
         response = httpx.post(
             "https://app.fonio.ai/api/public/v1/outbound_call",
-            json=payload,
-            headers={"Authorization": "Bearer fonio_a3d622e6f5ebafbd4598e6d70c7b97f8"},
+            json=payload,  # ← right here
+            headers={"Authorization": f"Bearer {FONIO_API_KEY}"},
             timeout=10,
         )
         print(
@@ -77,10 +95,11 @@ def trigger_fonio_call(candidate: dict, cancelled_appointment: dict):
         return response.json()
     except Exception as e:
         print(f"[FONIO] ERROR — call failed: {e}")
-        return {"error": str(e)}
+        return {
+            "error": str(e)
+        }  # ── Request models ─────────────────────────────────────────────
 
 
-# ── Request models ─────────────────────────────────────────────
 class NewClient(BaseModel):
     name: str
     phone: str
@@ -102,9 +121,11 @@ class NewClient(BaseModel):
         return v
 
 
+# priority removed — waitlist-only, always defaulted to 1 by DB
 class NewAppointment(BaseModel):
     reason_of_appointment: str
     appointment_at: str
+    doctor_name: str
 
     @field_validator("appointment_at")
     @classmethod
@@ -125,8 +146,6 @@ class CancelRequest(BaseModel):
 
 
 # ── Endpoints ──────────────────────────────────────────────────
-
-
 @app.get("/")
 def root():
     return {"status": "Dental clinic API is running"}
@@ -173,50 +192,54 @@ def create_appointment(
 ):
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # check if slot is already taken
             cur.execute(
                 """
                 SELECT appointment_id FROM appointments
                 WHERE appointment_at = %s
+                  AND doctor_name = %s
                   AND status = 'scheduled';
                 """,
-                (payload.appointment_at,),
+                (payload.appointment_at, payload.doctor_name),
             )
             conflict = cur.fetchone()
 
             if conflict:
-                # slot is busy — check if already on waitlist for this treatment
                 cur.execute(
                     """
                     SELECT waitlist_id FROM waitlist_entries
                     WHERE client_id = %s
                       AND reason_of_appointment = %s
+                      AND doctor_name = %s
                       AND active = TRUE;
                     """,
-                    (client["client_id"], payload.reason_of_appointment),
+                    (
+                        client["client_id"],
+                        payload.reason_of_appointment,
+                        payload.doctor_name,
+                    ),
                 )
                 already_waiting = cur.fetchone()
 
                 if already_waiting:
                     raise HTTPException(
                         status_code=400,
-                        detail="This slot is taken and you are already on the waitlist for this treatment.",
+                        detail="This slot is taken and you are already on the waitlist for this treatment with this doctor.",
                     )
 
-                # add to waitlist
+                # FIX: pass 1 (DB default) — column is NOT NULL, cannot insert NULL
                 cur.execute(
                     """
                     INSERT INTO waitlist_entries
-                        (client_id, reason_of_appointment, preferred_time, active)
-                    VALUES (%s, %s, %s, TRUE)
+                        (client_id, reason_of_appointment, doctor_name, preferred_time, priority, active)
+                    VALUES (%s, %s, %s, %s, %s, TRUE)
                     RETURNING waitlist_id;
                     """,
                     (
                         client["client_id"],
                         payload.reason_of_appointment,
-                        str(
-                            payload.appointment_at
-                        ),  # store their preferred time as a note
+                        payload.doctor_name,
+                        payload.appointment_at,
+                        1,
                     ),
                 )
                 waitlist_row = cur.fetchone()
@@ -227,6 +250,7 @@ def create_appointment(
                     "waitlist_id": waitlist_row[0],
                     "client_name": client["name"],
                     "reason_of_appointment": payload.reason_of_appointment,
+                    "doctor_name": payload.doctor_name,
                     "preferred_time": payload.appointment_at,
                     "message": (
                         f"The slot at {payload.appointment_at} is already taken. "
@@ -235,19 +259,19 @@ def create_appointment(
                     ),
                 }
 
-            # slot is free — book it normally
             cur.execute(
                 """
                 INSERT INTO appointments
-                    (client_id, reason_of_appointment, appointment_at, status)
-                VALUES (%s, %s, %s, 'scheduled')
+                    (client_id, reason_of_appointment, appointment_at, doctor_name, status)
+                VALUES (%s, %s, %s, %s, 'scheduled')
                 RETURNING appointment_id, client_id,
-                          reason_of_appointment, appointment_at, status;
+                          reason_of_appointment, appointment_at, doctor_name, status;
                 """,
                 (
                     client["client_id"],
                     payload.reason_of_appointment,
                     payload.appointment_at,
+                    payload.doctor_name,
                 ),
             )
             row = cur.fetchone()
@@ -260,7 +284,8 @@ def create_appointment(
         "client_name": client["name"],
         "reason_of_appointment": row[2],
         "appointment_at": str(row[3]),
-        "appointment_status": row[4],
+        "doctor_name": row[4],
+        "appointment_status": row[5],
         "message": "Appointment created successfully",
     }
 
@@ -272,10 +297,9 @@ def my_appointments(
 ):
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # Regular appointments
             cur.execute(
                 """
-                SELECT appointment_id, reason_of_appointment, appointment_at, status
+                SELECT appointment_id, reason_of_appointment, appointment_at, doctor_name, status
                 FROM appointments
                 WHERE client_id = %s
                   AND status != 'cancelled'
@@ -285,10 +309,9 @@ def my_appointments(
             )
             appointments = cur.fetchall()
 
-            # Waitlist entries
             cur.execute(
                 """
-                SELECT waitlist_id, reason_of_appointment, preferred_time
+                SELECT waitlist_id, reason_of_appointment, doctor_name, preferred_time, priority
                 FROM waitlist_entries
                 WHERE client_id = %s
                   AND active = TRUE
@@ -305,7 +328,8 @@ def my_appointments(
                 "appointment_id": row[0],
                 "reason_of_appointment": row[1],
                 "appointment_at": str(row[2]),
-                "status": row[3],
+                "doctor_name": row[3],
+                "status": row[4],
                 "action": f"To cancel: POST /appointments/{row[0]}/cancel",
             }
             for row in appointments
@@ -314,9 +338,11 @@ def my_appointments(
             {
                 "waitlist_id": row[0],
                 "reason_of_appointment": row[1],
-                "preferred_time": str(row[2]),
+                "doctor_name": row[2],
+                "preferred_time": str(row[3]),
+                "priority": row[4],
                 "status": "waiting",
-                "action": f"To cancel: POST /waitlist/{row[0]}/cancel",  # ← add this
+                "action": f"To cancel: POST /waitlist/{row[0]}/cancel",
             }
             for row in waitlist
         ],
@@ -335,12 +361,14 @@ def cancel_appointment(
     payload: CancelRequest,
     client: dict = Depends(require_client),
 ):
+    top_candidate = None  # safe initialization
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT a.appointment_id, a.client_id, a.reason_of_appointment,
-                       a.appointment_at, a.status, c.name, c.phone
+                       a.appointment_at, a.doctor_name, a.status, c.name, c.phone
                 FROM appointments a
                 JOIN clients c ON c.client_id = a.client_id
                 WHERE a.appointment_id = %s;
@@ -357,7 +385,7 @@ def cancel_appointment(
                 raise HTTPException(
                     status_code=403, detail="You can only cancel your own appointments"
                 )
-            if appt[4] == "cancelled":
+            if appt[5] == "cancelled":
                 raise HTTPException(
                     status_code=400, detail="Appointment is already cancelled"
                 )
@@ -370,26 +398,44 @@ def cancel_appointment(
             cur.execute(
                 """
                 SELECT w.waitlist_id, c.client_id, c.name, c.phone,
-                    w.reason_of_appointment, w.preferred_time
+                       w.reason_of_appointment, w.doctor_name, w.preferred_time
                 FROM waitlist_entries w
                 JOIN clients c ON c.client_id = w.client_id
                 WHERE w.active = TRUE
-                ORDER BY w.preferred_time ASC
+                  AND w.doctor_name = %s
+                  AND w.reason_of_appointment = %s
+                ORDER BY w.priority DESC NULLS LAST, w.preferred_time ASC
                 LIMIT 1;
                 """,
+                (appt[4], appt[2]),
             )
             top_candidate = cur.fetchone()
+
+            if top_candidate:
+                cur.execute(
+                    "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
+                    (top_candidate[0],),
+                )
 
         conn.commit()
 
     if top_candidate:
-        trigger_fonio_call(
+        fonio_result = trigger_fonio_call(
             candidate={"name": top_candidate[2], "phone": top_candidate[3]},
             cancelled_appointment={
                 "reason_of_appointment": appt[2],
                 "appointment_at": str(appt[3]),
+                "doctor_name": appt[4],
             },
         )
+        if "error" in fonio_result:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE waitlist_entries SET active = TRUE WHERE waitlist_id = %s;",
+                        (top_candidate[0],),
+                    )
+                conn.commit()
 
     return {
         "message": "Appointment cancelled successfully",
@@ -397,10 +443,13 @@ def cancel_appointment(
             "appointment_id": appt[0],
             "reason_of_appointment": appt[2],
             "appointment_at": str(appt[3]),
+            "doctor_name": appt[4],
         },
+        "fonio_called": top_candidate is not None,
     }
 
 
+# 5. CANCEL waitlist entry — requires auth
 @app.post("/waitlist/{waitlist_id}/cancel")
 def cancel_waitlist_entry(
     waitlist_id: int,
@@ -410,7 +459,7 @@ def cancel_waitlist_entry(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT waitlist_id, client_id, reason_of_appointment, preferred_time, active
+                SELECT waitlist_id, client_id, reason_of_appointment, doctor_name, preferred_time, active
                 FROM waitlist_entries
                 WHERE waitlist_id = %s;
                 """,
@@ -428,7 +477,7 @@ def cancel_waitlist_entry(
                     status_code=403,
                     detail="You can only cancel your own waitlist entries",
                 )
-            if not entry[4]:
+            if not entry[5]:
                 raise HTTPException(
                     status_code=400,
                     detail="This waitlist entry is already inactive",
@@ -445,12 +494,13 @@ def cancel_waitlist_entry(
         "cancelled_waitlist": {
             "waitlist_id": entry[0],
             "reason_of_appointment": entry[2],
-            "preferred_time": str(entry[3]),
+            "doctor_name": entry[3],
+            "preferred_time": str(entry[4]),
         },
     }
 
 
-# 5. DELETE my account — removes client + all data via CASCADE
+# 6. DELETE my account — removes client + all data via CASCADE
 @app.delete("/clients/me", status_code=200)
 def delete_client(
     client: dict = Depends(require_client),
@@ -473,17 +523,17 @@ def delete_client(
     }
 
 
+# 7. FONIO WEBHOOK
 @app.post("/webhooks/fonio", include_in_schema=False)
 async def fonio_webhook(request: Request):
     data = await request.json()
 
-    # extract what fonio found from the conversation
     outcome = data.get("extractionData", {}).get("accepted", "unknown")
     to_number = data.get("toNumber", "")
     context = data.get("context", {})
-
     reason = context.get("reason", "")
-    slot_time = context.get("slot_time", "")
+    slot_time_db = context.get("slot_time_db", "")
+    doctor = context.get("doctor", "")
 
     print(f"[FONIO] Call ended. Number: {to_number} | Outcome: {outcome}")
 
@@ -492,115 +542,93 @@ async def fonio_webhook(request: Request):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT w.client_id, w.reason_of_appointment, w.preferred_time
+                    SELECT w.waitlist_id, w.client_id, w.reason_of_appointment,
+                           w.doctor_name, w.preferred_time
                     FROM waitlist_entries w
                     JOIN clients c ON c.client_id = w.client_id
-                    WHERE c.phone = %s AND w.active = TRUE
-                    ORDER BY w.preferred_time ASC
+                    WHERE c.phone = %s
+                      AND w.active = FALSE
+                      AND w.doctor_name = %s
+                      AND w.reason_of_appointment = %s
+                    ORDER BY w.waitlist_id DESC
                     LIMIT 1;
                     """,
-                    (to_number,),
+                    (to_number, doctor, reason),
                 )
                 entry = cur.fetchone()
 
                 if entry:
                     cur.execute(
-                        "UPDATE waitlist_entries SET active = FALSE WHERE client_id = %s AND active = TRUE;",
-                        (entry[0],),
-                    )
-                    cur.execute(
                         """
-                        INSERT INTO appointments (client_id, reason_of_appointment, appointment_at, status)
-                        VALUES (%s, %s, %s, 'scheduled');
+                        INSERT INTO appointments
+                            (client_id, reason_of_appointment, appointment_at, doctor_name, status)
+                        VALUES (%s, %s, %s, %s, 'scheduled');
                         """,
-                        (entry[0], entry[1], entry[2]),
+                        (entry[1], reason, slot_time_db, doctor),
                     )
-            conn.commit()  # ← outside the cursor block, inside the connection block
+            conn.commit()
 
-        print(
-            f"[FONIO] Slot accepted by {to_number} — waitlist entry deactivated and appointment booked"
-        )
-        return {
-            "status": "booked",
-            "phone": to_number,
-        }  # ← outside the connection block entirely
+        print(f"[FONIO] Slot accepted by {to_number} — appointment booked")
+        return {"status": "booked", "phone": to_number}
 
-    elif outcome == "no":
-        # patient declined — find next active candidate and call them
+    elif outcome in ("no", "voicemail"):
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                SELECT w.waitlist_id, c.client_id, c.name, c.phone,
-                    w.reason_of_appointment, w.preferred_time
-                FROM waitlist_entries w
-                JOIN clients c ON c.client_id = w.client_id
-                WHERE w.active = TRUE
-                AND c.phone != %s
-                ORDER BY w.preferred_time ASC
-                LIMIT 1;
-                """,
-                    (to_number,),
+                    SELECT w.waitlist_id, c.client_id, c.name, c.phone,
+                           w.reason_of_appointment, w.doctor_name, w.preferred_time
+                    FROM waitlist_entries w
+                    JOIN clients c ON c.client_id = w.client_id
+                    WHERE w.active = TRUE
+                      AND c.phone != %s
+                      AND w.doctor_name = %s
+                      AND w.reason_of_appointment = %s
+                    ORDER BY w.priority DESC NULLS LAST, w.preferred_time ASC
+                    LIMIT 1;
+                    """,
+                    (to_number, doctor, reason),
                 )
                 next_candidate = cur.fetchone()
 
+                if next_candidate:
+                    cur.execute(
+                        "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
+                        (next_candidate[0],),
+                    )
+            if next_candidate:
+                conn.commit()
+
         if next_candidate:
-            next_person = {
-                "phone": next_candidate[3],
-                "name": next_candidate[2],
-            }
-            trigger_fonio_call(
+            next_person = {"phone": next_candidate[3], "name": next_candidate[2]}
+            fonio_result = trigger_fonio_call(
                 candidate=next_person,
                 cancelled_appointment={
                     "reason_of_appointment": reason,
-                    "appointment_at": slot_time,
+                    "appointment_at": slot_time_db,
+                    "doctor_name": doctor,
                 },
             )
+            if "error" in fonio_result:
+                with get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE waitlist_entries SET active = TRUE WHERE waitlist_id = %s;",
+                            (next_candidate[0],),
+                        )
+                    conn.commit()
+
             print(
-                f"[FONIO] Moving to next candidate: {next_person['name']} {next_person['phone']}"
-            )
-            return {"status": "calling_next", "next": next_person["phone"]}
-        else:
-            print("[FONIO] No more candidates on waitlist — slot remains open")
-            return {"status": "no_more_candidates"}
-
-    elif outcome == "voicemail":
-        print(f"[FONIO] Reached voicemail for {to_number} — moving to next")
-        # same logic as "no" — call next person
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                SELECT w.waitlist_id, c.client_id, c.name, c.phone,
-                    w.reason_of_appointment, w.preferred_time
-                FROM waitlist_entries w
-                JOIN clients c ON c.client_id = w.client_id
-                WHERE w.active = TRUE
-                AND c.phone != %s
-                ORDER BY w.preferred_time ASC
-                LIMIT 1;
-                """,
-                    (to_number,),
-                )
-                next_candidate = cur.fetchone()
-
-        if next_candidate:
-            next_person = {
-                "phone": next_candidate[3],
-                "name": next_candidate[2],
-            }
-            trigger_fonio_call(
-                candidate=next_person,
-                cancelled_appointment={
-                    "reason_of_appointment": reason,
-                    "appointment_at": slot_time,
-                },
+                f"[FONIO] Moving to next: {next_person['name']} {next_person['phone']}"
             )
             return {
-                "status": "calling_next_after_voicemail",
+                "status": "calling_next_after_voicemail"
+                if outcome == "voicemail"
+                else "calling_next",
                 "next": next_person["phone"],
             }
         else:
+            print("[FONIO] No more candidates — slot remains open")
             return {"status": "no_more_candidates"}
 
     else:
