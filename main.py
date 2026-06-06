@@ -272,6 +272,7 @@ def my_appointments(
 ):
     with get_connection() as conn:
         with conn.cursor() as cur:
+            # Regular appointments
             cur.execute(
                 """
                 SELECT appointment_id, reason_of_appointment, appointment_at, status
@@ -282,14 +283,20 @@ def my_appointments(
                 """,
                 (client["client_id"],),
             )
-            rows = cur.fetchall()
+            appointments = cur.fetchall()
 
-    if not rows:
-        return {
-            "client_name": client["name"],
-            "appointments": [],
-            "message": "You have no active appointments",
-        }
+            # Waitlist entries
+            cur.execute(
+                """
+                SELECT waitlist_id, reason_of_appointment, preferred_time
+                FROM waitlist_entries
+                WHERE client_id = %s
+                  AND active = TRUE
+                ORDER BY preferred_time ASC;
+                """,
+                (client["client_id"],),
+            )
+            waitlist = cur.fetchall()
 
     return {
         "client_name": client["name"],
@@ -301,8 +308,23 @@ def my_appointments(
                 "status": row[3],
                 "action": f"To cancel: POST /appointments/{row[0]}/cancel",
             }
-            for row in rows
+            for row in appointments
         ],
+        "waitlist": [
+            {
+                "waitlist_id": row[0],
+                "reason_of_appointment": row[1],
+                "preferred_time": str(row[2]),
+                "status": "waiting",
+                "action": f"To cancel: POST /waitlist/{row[0]}/cancel",  # ← add this
+            }
+            for row in waitlist
+        ],
+        "message": (
+            "No appointments or waitlist entries"
+            if not appointments and not waitlist
+            else "OK"
+        ),
     }
 
 
@@ -375,6 +397,55 @@ def cancel_appointment(
             "appointment_id": appt[0],
             "reason_of_appointment": appt[2],
             "appointment_at": str(appt[3]),
+        },
+    }
+
+
+@app.post("/waitlist/{waitlist_id}/cancel")
+def cancel_waitlist_entry(
+    waitlist_id: int,
+    client: dict = Depends(require_client),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT waitlist_id, client_id, reason_of_appointment, preferred_time, active
+                FROM waitlist_entries
+                WHERE waitlist_id = %s;
+                """,
+                (waitlist_id,),
+            )
+            entry = cur.fetchone()
+
+            if not entry:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Waitlist entry {waitlist_id} not found",
+                )
+            if entry[1] != client["client_id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You can only cancel your own waitlist entries",
+                )
+            if not entry[4]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="This waitlist entry is already inactive",
+                )
+
+            cur.execute(
+                "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
+                (waitlist_id,),
+            )
+        conn.commit()
+
+    return {
+        "message": "Waitlist entry cancelled successfully",
+        "cancelled_waitlist": {
+            "waitlist_id": entry[0],
+            "reason_of_appointment": entry[2],
+            "preferred_time": str(entry[3]),
         },
     }
 
