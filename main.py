@@ -11,6 +11,10 @@ import hashlib
 app = FastAPI(title="Dental clinic system")
 security = HTTPBasic()
 
+# ── Request models ─────────────────────────────────────────────
+class NewWaitlistEntry(BaseModel):
+    reason_of_appointment: str
+    preferred_time: str
 
 # ── DB connection ──────────────────────────────────────────────
 def get_connection():
@@ -176,12 +180,14 @@ def create_appointment(
 # Call this first to see IDs before cancelling
 # 3. LIST my appointments — requires auth
 # Call this first to see IDs before cancelling
+# 3. LIST my appointments AND waitlist — requires auth
 @app.get("/appointments/mine")
 def my_appointments(
     client: dict = Depends(require_client),
 ):
     with get_connection() as conn:
         with conn.cursor() as cur:
+            # Fetch scheduled appointments
             cur.execute(
                 """
                 SELECT appointment_id, reason_of_appointment, appointment_at, status
@@ -192,29 +198,50 @@ def my_appointments(
                 """,
                 (client["client_id"],),
             )
-            rows = cur.fetchall()
+            appt_rows = cur.fetchall()
 
-    if not rows:
-        return {
-            "client_name": client["name"],
-            "appointments": [],
-            "message": "You have no active appointments",
+            # Fetch active waitlist entries
+            cur.execute(
+                """
+                SELECT waitlist_id, reason_of_appointment, preferred_time
+                FROM waitlist_entries
+                WHERE client_id = %s
+                  AND active = TRUE
+                ORDER BY preferred_time ASC;
+                """,
+                (client["client_id"],),
+            )
+            wait_rows = cur.fetchall()
+
+    # Format standard appointments
+    appointments = [
+        {
+            "appointment_id": row[0],
+            "reason_of_appointment": row[1],
+            "appointment_at": str(row[2]),
+            "status": row[3],
+            "action": f"To cancel: POST /appointments/{row[0]}/cancel",
         }
+        for row in appt_rows
+    ]
+
+    # Format waitlist entries
+    waitlist = [
+        {
+            "waitlist_id": row[0],
+            "reason_of_appointment": row[1],
+            "preferred_time": str(row[2]),
+            "action": f"To cancel: POST /waitlist/{row[0]}/cancel",
+        }
+        for row in wait_rows
+    ]
 
     return {
         "client_name": client["name"],
-        "appointments": [
-            {
-                "appointment_id": row[0],
-                "reason_of_appointment": row[1],
-                "appointment_at": str(row[2]),
-                "status": row[3],
-                "action": f"To cancel: POST /appointments/{row[0]}/cancel",
-            }
-            for row in rows
-        ],
+        "appointments": appointments,
+        "waitlist": waitlist,
+        "message": "Fetched data successfully."
     }
-
 
 # 4. CANCEL appointment — requires auth, only your own
 @app.post("/appointments/{appointment_id}/cancel")
@@ -320,3 +347,97 @@ def delete_client(
             "phone": client["phone"],
         },
     }
+
+@app.get("/schedule")
+def get_daily_schedule(date: str):
+    """Returns a list of booked times for a specific date (YYYY-MM-DD)"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT appointment_at 
+                FROM appointments 
+                WHERE DATE(appointment_at) = %s 
+                  AND status = 'scheduled';
+                """,
+                (date,)
+            )
+            rows = cur.fetchall()
+            
+    # Extract just the "HH:MM" part of the datetime objects
+    booked_times = [row[0].strftime("%H:%M") for row in rows]
+    
+    return {"booked_times": booked_times}
+
+# 5. JOIN WAITLIST — requires auth
+@app.post("/waitlist", status_code=201)
+def join_waitlist(
+    payload: NewWaitlistEntry,
+    client: dict = Depends(require_client),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO waitlist_entries 
+                    (client_id, reason_of_appointment, preferred_time, active)
+                VALUES (%s, %s, %s, TRUE)
+                RETURNING waitlist_id;
+                """,
+                (
+                    client["client_id"],
+                    payload.reason_of_appointment,
+                    payload.preferred_time,
+                ),
+            )
+        conn.commit()
+
+    return {
+        "message": "Successfully added to waitlist",
+        "client_name": client["name"],
+        "preferred_time": payload.preferred_time
+    }
+
+# 6. CANCEL WAITLIST ENTRY — requires auth, only your own
+@app.post("/waitlist/{waitlist_id}/cancel")
+def cancel_waitlist(
+    waitlist_id: int,
+    payload: CancelRequest,
+    client: dict = Depends(require_client),
+):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT waitlist_id, client_id, active
+                FROM waitlist_entries
+                WHERE waitlist_id = %s;
+                """,
+                (waitlist_id,),
+            )
+            wait_entry = cur.fetchone()
+
+            if not wait_entry:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Waitlist entry {waitlist_id} not found"
+                )
+            if wait_entry[1] != client["client_id"]:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="You can only cancel your own waitlist entries"
+                )
+            if not wait_entry[2]: # active == False
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Waitlist entry is already cancelled or inactive"
+                )
+
+            # Mark as inactive instead of deleting to keep a history
+            cur.execute(
+                "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
+                (waitlist_id,)
+            )
+        conn.commit()
+
+    return {"message": "Waitlist entry cancelled successfully"}
