@@ -225,7 +225,7 @@ class ClinicState(rx.State):
         
         booked_times = []
         try:
-            response = requests.get(f"{API_URL}/schedule?date={date_str}", timeout=3)
+            response = requests.get(f"{API_URL}/schedule?date={date_str}&doctor={self.selected_doctor}",timeout=3)
             if response.status_code == 200:
                 booked_times = response.json().get("booked_times", [])
         except Exception:
@@ -256,7 +256,7 @@ class ClinicState(rx.State):
         endpoint = "/appointments" if self.booking_type == "standard" else "/waitlist"
         payload_key = "appointment_at" if self.booking_type == "standard" else "preferred_time"
         
-        payload = {"reason_of_appointment": self.selected_reason, payload_key: formatted_datetime}
+        payload = {"reason_of_appointment": self.selected_reason, "doctor_name": self.selected_doctor, payload_key: formatted_datetime}
         response = requests.post(f"{API_URL}{endpoint}", json=payload, auth=(self.phone, self.password))
         
         if response.status_code == 201:

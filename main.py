@@ -349,25 +349,20 @@ def delete_client(
     }
 
 @app.get("/schedule")
-def get_daily_schedule(date: str):
-    """Returns a list of booked times for a specific date (YYYY-MM-DD)"""
+def get_daily_schedule(date: str, doctor: str = ""):
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT appointment_at 
-                FROM appointments 
-                WHERE DATE(appointment_at) = %s 
-                  AND status = 'scheduled';
+                SELECT appointment_at FROM appointments
+                WHERE DATE(appointment_at) = %s
+                  AND status = 'scheduled'
+                  AND (%s = '' OR doctor_name = %s);
                 """,
-                (date,)
+                (date, doctor, doctor)
             )
             rows = cur.fetchall()
-            
-    # Extract just the "HH:MM" part of the datetime objects
-    booked_times = [row[0].strftime("%H:%M") for row in rows]
-    
-    return {"booked_times": booked_times}
+    return {"booked_times": [row[0].strftime("%H:%M") for row in rows]}
 
 # 5. JOIN WAITLIST — requires auth
 @app.post("/waitlist", status_code=201)
