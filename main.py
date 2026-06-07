@@ -286,6 +286,7 @@ def create_appointment(
         "message": "Appointment created successfully",
     }
 
+
 @app.get("/schedule")
 def get_schedule(date: str, doctor: str):
     with get_connection() as conn:
@@ -298,13 +299,14 @@ def get_schedule(date: str, doctor: str):
                   AND doctor_name = %s 
                   AND status = 'scheduled';
                 """,
-                (f"{date}%", doctor)
+                (f"{date}%", doctor),
             )
             rows = cur.fetchall()
             # Extracts the "HH:MM" portion from "YYYY-MM-DD HH:MM:SS"
             booked_times = [str(row[0]).split()[1][:5] for row in rows]
-            
+
     return {"booked_times": booked_times}
+
 
 @app.get("/doctors")
 def get_doctors():
