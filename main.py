@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, field_validator
@@ -669,3 +669,277 @@ async def fonio_webhook(request: Request):
             "reason": reason,
             "phone": to_number,
         }
+
+
+# ── Admin Auth ─────────────────────────────────────────────────
+ADMIN_PHONE = os.environ.get("ADMIN_PHONE")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(security)):
+    if credentials.username != ADMIN_PHONE or credentials.password != ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin access only",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return True
+
+
+# ── Admin: Live call status ────────────────────────────────────
+@app.get("/admin/live")
+def admin_live(admin=Depends(require_admin)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            # Active waitlist entries right now
+            cur.execute(
+                """
+                SELECT w.waitlist_id, c.name, c.phone,
+                       w.reason_of_appointment, w.doctor_name,
+                       w.preferred_time, w.priority
+                FROM waitlist_entries w
+                JOIN clients c ON c.client_id = w.client_id
+                WHERE w.active = TRUE
+                ORDER BY w.priority DESC, w.preferred_time ASC;
+                """
+            )
+            waitlist = cur.fetchall()
+
+            # Last 20 call log entries
+            cur.execute(
+                """
+                SELECT cl.log_id, c.name, cl.phone, cl.doctor_name,
+                       cl.reason, cl.slot_time, cl.outcome, cl.logged_at
+                FROM call_log cl
+                LEFT JOIN clients c ON c.client_id = cl.client_id
+                ORDER BY cl.logged_at DESC
+                LIMIT 20;
+                """
+            )
+            recent_calls = cur.fetchall()
+
+            # Scheduled appointments today
+            today = datetime.now().date()
+            cur.execute(
+                """
+                SELECT a.appointment_id, c.name, c.phone,
+                       a.reason_of_appointment, a.appointment_at,
+                       a.doctor_name, a.status
+                FROM appointments a
+                JOIN clients c ON c.client_id = a.client_id
+                WHERE DATE(a.appointment_at) = %s
+                ORDER BY a.appointment_at ASC;
+                """,
+                (today,),
+            )
+            todays_appointments = cur.fetchall()
+
+    return {
+        "active_waitlist": [
+            {
+                "waitlist_id": r[0],
+                "name": r[1],
+                "phone": r[2],
+                "reason": r[3],
+                "doctor": r[4],
+                "preferred_time": str(r[5]),
+                "priority": r[6],
+            }
+            for r in waitlist
+        ],
+        "recent_calls": [
+            {
+                "log_id": r[0],
+                "name": r[1] or "Unknown",
+                "phone": r[2],
+                "doctor": r[3],
+                "reason": r[4],
+                "slot_time": str(r[5]),
+                "outcome": r[6],
+                "logged_at": str(r[7]),
+            }
+            for r in recent_calls
+        ],
+        "todays_appointments": [
+            {
+                "appointment_id": r[0],
+                "name": r[1],
+                "phone": r[2],
+                "reason": r[3],
+                "appointment_at": str(r[4]),
+                "doctor": r[5],
+                "status": r[6],
+            }
+            for r in todays_appointments
+        ],
+    }
+
+
+# ── Admin: Weekly metrics ──────────────────────────────────────
+@app.get("/admin/metrics")
+def admin_metrics(admin=Depends(require_admin)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            week_ago = datetime.now().date() - timedelta(days=7)
+
+            # Total appointments this week
+            cur.execute(
+                "SELECT COUNT(*) FROM appointments WHERE appointment_at >= %s;",
+                (week_ago,),
+            )
+            total_appointments = cur.fetchone()[0]
+
+            # Recovered (waitlisted → booked via fonio)
+            cur.execute(
+                "SELECT COUNT(*) FROM call_log WHERE outcome = 'yes' AND logged_at >= %s;",
+                (week_ago,),
+            )
+            recovered = cur.fetchone()[0]
+
+            # Rebooking rate = recovered / total cancelled this week
+            cur.execute(
+                "SELECT COUNT(*) FROM appointments WHERE status = 'cancelled' AND appointment_at >= %s;",
+                (week_ago,),
+            )
+            cancelled = cur.fetchone()[0]
+            rebooking_rate = (
+                round((recovered / cancelled * 100), 1) if cancelled > 0 else 0.0
+            )
+
+            # Revenue recovered (assume €80 per recovered appointment)
+            revenue_per_slot = 80
+            revenue_recovered = recovered * revenue_per_slot
+
+            # Avg attempts per slot = total calls / unique slots called
+            cur.execute(
+                """
+                SELECT slot_time, doctor_name, reason, COUNT(*) as attempts
+                FROM call_log
+                WHERE logged_at >= %s
+                GROUP BY slot_time, doctor_name, reason;
+                """,
+                (week_ago,),
+            )
+            slot_rows = cur.fetchall()
+            total_calls = sum(r[3] for r in slot_rows)
+            avg_attempts = round(total_calls / len(slot_rows), 2) if slot_rows else 0.0
+
+            # Outcomes breakdown
+            cur.execute(
+                """
+                SELECT outcome, COUNT(*) FROM call_log
+                WHERE logged_at >= %s
+                GROUP BY outcome ORDER BY COUNT(*) DESC;
+                """,
+                (week_ago,),
+            )
+            outcomes = {r[0]: r[1] for r in cur.fetchall()}
+
+            # Results by reason (top reasons + their accept rate)
+            cur.execute(
+                """
+                SELECT reason,
+                       COUNT(*) as total_calls,
+                       SUM(CASE WHEN outcome = 'yes' THEN 1 ELSE 0 END) as accepted
+                FROM call_log
+                WHERE logged_at >= %s
+                GROUP BY reason
+                ORDER BY total_calls DESC;
+                """,
+                (week_ago,),
+            )
+            by_reason = [
+                {
+                    "reason": r[0],
+                    "total_calls": r[1],
+                    "accepted": r[2],
+                    "accept_rate": round(r[2] / r[1] * 100, 1) if r[1] > 0 else 0.0,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # Results by doctor
+            cur.execute(
+                """
+                SELECT doctor_name,
+                       COUNT(*) as total_calls,
+                       SUM(CASE WHEN outcome = 'yes' THEN 1 ELSE 0 END) as accepted
+                FROM call_log
+                WHERE logged_at >= %s
+                GROUP BY doctor_name
+                ORDER BY total_calls DESC;
+                """,
+                (week_ago,),
+            )
+            by_doctor = [
+                {
+                    "doctor": r[0],
+                    "total_calls": r[1],
+                    "accepted": r[2],
+                    "accept_rate": round(r[2] / r[1] * 100, 1) if r[1] > 0 else 0.0,
+                }
+                for r in cur.fetchall()
+            ]
+
+    return {
+        "period": f"{week_ago} to {datetime.now().date()}",
+        "total_appointments": total_appointments,
+        "cancelled": cancelled,
+        "recovered": recovered,
+        "rebooking_rate_pct": rebooking_rate,
+        "revenue_recovered_eur": revenue_recovered,
+        "avg_attempts_per_slot": avg_attempts,
+        "outcomes_breakdown": outcomes,
+        "by_reason": by_reason,
+        "by_doctor": by_doctor,
+    }
+
+
+# ── Admin: Override — manually trigger call for a slot ─────────
+@app.post("/admin/override/call")
+def admin_override_call(
+    doctor_name: str,
+    reason_of_appointment: str,
+    appointment_at: str,
+    admin=Depends(require_admin),
+):
+    status_str, called_phone = _score_and_pick_next(
+        reason=reason_of_appointment,
+        doctor=doctor_name,
+        slot_time_db=appointment_at,
+        skip_phone="__none__",
+    )
+    return {"status": status_str, "called": called_phone}
+
+
+# ── Admin: List all appointments (any status) ──────────────────
+@app.get("/admin/appointments")
+def admin_all_appointments(admin=Depends(require_admin)):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.appointment_id, c.name, c.phone,
+                       a.reason_of_appointment, a.appointment_at,
+                       a.doctor_name, a.status
+                FROM appointments a
+                JOIN clients c ON c.client_id = a.client_id
+                ORDER BY a.appointment_at DESC
+                LIMIT 100;
+                """
+            )
+            rows = cur.fetchall()
+    return {
+        "appointments": [
+            {
+                "appointment_id": r[0],
+                "name": r[1],
+                "phone": r[2],
+                "reason": r[3],
+                "appointment_at": str(r[4]),
+                "doctor": r[5],
+                "status": r[6],
+            }
+            for r in rows
+        ]
+    }
