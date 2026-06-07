@@ -176,11 +176,7 @@ def create_appointment(
     }
 
 
-# 3. LIST my appointments — requires auth
-# Call this first to see IDs before cancelling
-# 3. LIST my appointments — requires auth
-# Call this first to see IDs before cancelling
-# 3. LIST my appointments AND waitlist — requires auth
+# 3. CREATE waitlist entry — requires auth
 @app.get("/appointments/mine")
 def my_appointments(
     client: dict = Depends(require_client),

@@ -28,7 +28,6 @@ SOFT_YELLOW = "#e6d783"
 DARK_YELLOW = "#8f6b00"
 
 # --- Animation & Interactive Styles ---
-# --- Animation & Interactive Styles ---
 GLOBAL_STYLE = {
     "input::placeholder": {
         "color": f"{PALETTE_MID_DARK} !important",
@@ -119,12 +118,13 @@ class ClinicState(rx.State):
     selected_time: str = ""
     booking_type: str = "" 
 
-    # UI Mock Data (Updated with Burmal Dentist info)
-    doctors: list[dict[str, str]] = [
-        {"name": "Dr. J Pork", "specialty": "General & Emergency Pain"},
-        {"name": "Dr. James", "specialty": "Restorative, Fillings & Crowns"},
-        {"name": "Dr. Mike", "specialty": "Preventive, Cleaning & Cosmetic"}
-    ]
+    # UI Mock Data 
+    doctors: list[dict[str, str]] = []
+    SPECIALTY_MAP: dict[str, str] = {
+        "Dr. J Pork": "General & Emergency Pain",
+        "Dr. James": "Restorative, Fillings & Crowns",
+        "Dr. Mike": "Preventive, Cleaning & Cosmetic"
+    }
     years: list[str] = ["2026", "2027"]
     months: list[str] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
     calendar_days: list[dict] = [] 
@@ -132,7 +132,26 @@ class ClinicState(rx.State):
     # Backend Data Arrays
     daily_schedule: list[list[str]] = [] 
     my_appointments: list[dict] = []
-    my_waitlist: list[dict] = [] 
+    my_waitlist: list[dict] = []
+
+    def load_doctors(self):
+        try:
+            response = requests.get(f"{API_URL}/doctors", timeout=3)
+            if response.status_code == 200:
+                # Expecting backend to send: {"doctors": ["Dr. J Pork", "Dr. James", ...]}
+                doctor_names = response.json().get("doctors", [])
+                
+                formatted_doctors = []
+                for name in doctor_names:
+                    # Look up the specialty, default to "General Dentistry" if not found
+                    specialty = self.SPECIALTY_MAP.get(name, "General Dentistry")
+                    formatted_doctors.append({"name": name, "specialty": specialty})
+                    
+                self.doctors = formatted_doctors
+            else:
+                print("Failed to load doctors from backend.")
+        except Exception as e:
+            print(f"Error fetching doctors: {e}")
 
     # --- Dynamic Calendar Logic ---
     def update_calendar(self):
@@ -592,4 +611,4 @@ def index() -> rx.Component:
     )
 
 app = rx.App(style=GLOBAL_STYLE)
-app.add_page(index)
+app.add_page(index, on_load=ClinicState.load_doctors)
