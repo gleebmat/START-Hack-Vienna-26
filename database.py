@@ -12,7 +12,6 @@ def get_connection():
 
 
 def create_tables():
-
     create_clients = """
     CREATE TABLE IF NOT EXISTS clients (
         client_id     SERIAL       PRIMARY KEY,
@@ -28,6 +27,7 @@ def create_tables():
         client_id             INTEGER      NOT NULL REFERENCES clients(client_id) ON DELETE CASCADE,
         reason_of_appointment VARCHAR(255) NOT NULL,
         appointment_at        TIMESTAMP    NOT NULL,
+        doctor_name           VARCHAR(255) NOT NULL,
         status                VARCHAR(50)  NOT NULL DEFAULT 'scheduled'
     );
     """
@@ -37,7 +37,9 @@ def create_tables():
         waitlist_id           SERIAL       PRIMARY KEY,
         client_id             INTEGER      NOT NULL REFERENCES clients(client_id) ON DELETE CASCADE,
         reason_of_appointment VARCHAR(255) NOT NULL,
-        preferred_time        VARCHAR(100),
+        doctor_name           VARCHAR(255) NOT NULL,
+        preferred_time        TIMESTAMP,
+        priority              INTEGER      NOT NULL DEFAULT 1,
         active                BOOLEAN      NOT NULL DEFAULT TRUE
     );
     """

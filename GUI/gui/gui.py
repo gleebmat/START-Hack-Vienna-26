@@ -41,7 +41,6 @@ GLOBAL_STYLE = {
         "0%": {"opacity": "0"},
         "100%": {"opacity": "1"},
     },
-    # New CSS for the Doctor Hover Effect
     ".doc-btn .doc-desc": {
         "max_height": "0",
         "opacity": "0",
@@ -55,11 +54,9 @@ GLOBAL_STYLE = {
     }
 }
 
-# (Keep your existing FADE_UP_ANIMATION, FADE_IN_ANIMATION, BTN_STYLE, and INPUT_STYLE here)
-
 # --- New Glassmorphism Styles ---
 GLASS_DESK_STYLE = {
-    "bg": "rgba(218, 230, 217, 0.35)", # Uses a transparent version of your PALETTE_PALEST
+    "bg": "rgba(218, 230, 217, 0.35)", 
     "backdrop_filter": "blur(16px)",
     "border": "1px solid rgba(255, 255, 255, 0.4)",
     "box_shadow": "0 8px 32px 0 rgba(53, 79, 54, 0.2)",
@@ -116,7 +113,6 @@ class ClinicState(rx.State):
     selected_month: str = "June"
     selected_day: str = ""
     selected_time: str = ""
-    booking_type: str = "" 
 
     # UI Mock Data 
     doctors: list[dict[str, str]] = []
@@ -130,7 +126,7 @@ class ClinicState(rx.State):
     calendar_days: list[dict] = [] 
 
     # Backend Data Arrays
-    daily_schedule: list[list[str]] = [] 
+    daily_schedule: list[dict[str, str]] = [] 
     my_appointments: list[dict] = []
     my_waitlist: list[dict] = []
 
@@ -138,12 +134,10 @@ class ClinicState(rx.State):
         try:
             response = requests.get(f"{API_URL}/doctors", timeout=3)
             if response.status_code == 200:
-                # Expecting backend to send: {"doctors": ["Dr. J Pork", "Dr. James", ...]}
                 doctor_names = response.json().get("doctors", [])
                 
                 formatted_doctors = []
                 for name in doctor_names:
-                    # Look up the specialty, default to "General Dentistry" if not found
                     specialty = self.SPECIALTY_MAP.get(name, "General Dentistry")
                     formatted_doctors.append({"name": name, "specialty": specialty})
                     
@@ -166,7 +160,7 @@ class ClinicState(rx.State):
             
         for d in range(1, num_days + 1):
             weekday = calendar.weekday(year_num, month_num, d)
-            is_sunday = (weekday == 6) # Sundays are closed
+            is_sunday = (weekday == 6) 
             days_list.append({"day": str(d), "disabled": is_sunday})
             
         self.calendar_days = days_list
@@ -242,9 +236,10 @@ class ClinicState(rx.State):
         month_num = datetime.strptime(self.selected_month, '%B').month
         date_str = f"{self.selected_year}-{month_num:02d}-{int(day):02d}"
         
+        # Fetch the booked times from the new backend endpoint
         booked_times = []
         try:
-            response = requests.get(f"{API_URL}/schedule?date={date_str}&doctor={self.selected_doctor}",timeout=3)
+            response = requests.get(f"{API_URL}/schedule?date={date_str}&doctor={self.selected_doctor}", timeout=3)
             if response.status_code == 200:
                 booked_times = response.json().get("booked_times", [])
         except Exception:
@@ -256,14 +251,13 @@ class ClinicState(rx.State):
         while curr <= end:
             t_str = curr.strftime("%H:%M")
             status = "booked" if t_str in booked_times else "available"
-            times.append([t_str, status])
+            times.append({"time": t_str, "status": status})
             curr += timedelta(minutes=30)
             
         self.daily_schedule = times
     
-    def handle_time_selection(self, time: str, status: str):
+    def handle_time_selection(self, time: str):
         self.selected_time = time
-        self.booking_type = "standard" if status == "available" else "waitlist"
         self.step = 5 
 
     def _format_datetime(self) -> str:
@@ -272,20 +266,25 @@ class ClinicState(rx.State):
     
     def submit_appointment(self):
         formatted_datetime = self._format_datetime()
-        endpoint = "/appointments" if self.booking_type == "standard" else "/waitlist"
-        payload_key = "appointment_at" if self.booking_type == "standard" else "preferred_time"
+        payload = {"reason_of_appointment": self.selected_reason, "doctor_name": self.selected_doctor, "appointment_at": formatted_datetime}
         
-        payload = {"reason_of_appointment": self.selected_reason, "doctor_name": self.selected_doctor, payload_key: formatted_datetime}
-        response = requests.post(f"{API_URL}{endpoint}", json=payload, auth=(self.phone, self.password))
-        
-        if response.status_code == 201:
-            msg = "Appointment booked successfully!" if self.booking_type == "standard" else f"Added to waitlist for {formatted_datetime}."
-            rx.window_alert(msg)
-        else:
-            return rx.window_alert(response.json().get("detail", "Request failed"))
-    
-        self.cancel_booking()
-        self.login() 
+        try:
+            response = requests.post(f"{API_URL}/appointments", json=payload, auth=(self.phone, self.password))
+            
+            if response.status_code == 201:
+                data = response.json()
+                msg = f"Slot taken. Added to waitlist for {formatted_datetime}." if data.get("status") == "waitlisted" else "Appointment booked successfully!"
+                
+                self.cancel_booking()
+                self.login() 
+                return rx.window_alert(msg)
+                
+            elif response.status_code == 400:
+                return rx.window_alert(response.json().get("detail", "Slot taken and already waitlisted."))
+            else:
+                return rx.window_alert(response.json().get("detail", "Request failed"))
+        except Exception:
+            return rx.window_alert("Connection error.")
     
     def cancel_booking(self):
         self.step = 0
@@ -358,7 +357,6 @@ def auth_screen() -> rx.Component:
                 ),
                 width="100%", spacing="4"
             ),
-            # Applied the new glassy desk style here
             **GLASS_DESK_STYLE, 
             max_width="400px", margin_top="1em", animation=FADE_UP_ANIMATION 
         ),
@@ -366,17 +364,24 @@ def auth_screen() -> rx.Component:
     )
 
 # --- Dashboard & Booking Screens ---
-def time_slot_card(time_val: str, status: str) -> rx.Component:
+def time_slot_card(item: dict) -> rx.Component:
+    time_val = item["time"]
+    status = item["status"]
+    
     is_available = (status == "available")
     is_selected = (ClinicState.selected_time == time_val)
+    
+    # Conditional coloring
     bg_color = rx.cond(is_available, ACTIVE_GREEN, SOFT_YELLOW)
     text_color = rx.cond(is_available, ACTIVE_TEXT, DARK_YELLOW)
 
     return rx.button(
         rx.text(time_val, font_size="1.2em", font_weight="600"),
-        on_click=ClinicState.handle_time_selection(time_val, status),
+        on_click=ClinicState.handle_time_selection(time_val),
         width="100%", padding="1.5em", border_radius="12px",
-        bg=rx.cond(is_selected, PALETTE_DARK, bg_color), color=rx.cond(is_selected, "white", text_color),
+        bg=rx.cond(is_selected, PALETTE_DARK, bg_color), 
+        color=rx.cond(is_selected, "white", text_color),
+        border=f"1px solid {PALETTE_LIGHT}",
         **BTN_STYLE 
     )
 
@@ -386,9 +391,25 @@ def entry_card(item: dict, is_waitlist: bool) -> rx.Component:
     
     return rx.hstack(
         rx.vstack(
-            rx.text(item[time_key], font_weight="600", color=TEXT_DARK, font_size="1.1em"),
+            rx.hstack(
+                rx.text(item[time_key], font_weight="600", color=TEXT_DARK, font_size="1.1em"),
+                rx.cond(
+                    is_waitlist,
+                    rx.box(
+                        rx.text(
+                            rx.cond(item["priority"] == 3, "High", rx.cond(item["priority"] == 2, "Medium", "Low")),
+                            font_size="0.75em", font_weight="700", text_transform="uppercase"
+                        ),
+                        bg=rx.cond(item["priority"] == 3, "#fee2e2", rx.cond(item["priority"] == 2, "#fef3c7", "#dcfce7")),
+                        color=rx.cond(item["priority"] == 3, "#991b1b", rx.cond(item["priority"] == 2, "#92400e", "#166534")),
+                        padding="0.2em 0.8em", border_radius="8px", margin_left="1em",
+                        border=rx.cond(item["priority"] == 3, "1px solid #f87171", rx.cond(item["priority"] == 2, "1px solid #fbbf24", "1px solid #4ade80"))
+                    )
+                )
+            ),
             rx.text(item["reason_of_appointment"], color=TEXT_LIGHT, font_size="0.95em"),
-            align_items="flex-start"
+            rx.text(item["doctor_name"], color=PALETTE_MID_DARK, font_size="0.85em", font_weight="500"),
+            align_items="flex-start", spacing="1"
         ),
         rx.spacer(),
         rx.button("Cancel", on_click=lambda: ClinicState.cancel_existing_appointment(item[id_key], is_waitlist), bg="#fca5a5", color="#7f1d1d", border_radius="8px", padding="1em 1.5em", **BTN_STYLE),
@@ -429,7 +450,7 @@ def booking_widget() -> rx.Component:
                 ),
                 rx.divider(margin_y="1em", border_color="rgba(0,0,0,0.1)"),
                 
-                # Step 1: Doctor Selection with Fixed Height to stop layout shifting
+                # Step 1: Doctor Selection 
                 animated_container(
                     rx.vstack(
                         rx.text("Who would you like to see?", font_weight="500", color=TEXT_DARK),
@@ -447,7 +468,7 @@ def booking_widget() -> rx.Component:
                                     border_radius="12px", padding="1.5em", 
                                     bg=rx.cond(ClinicState.selected_doctor == doc["name"], ACTIVE_GREEN, "rgba(255,255,255,0.8)"), 
                                     color=rx.cond(ClinicState.selected_doctor == doc["name"], ACTIVE_TEXT, TEXT_DARK), 
-                                    height="115px", # <-- Fixed height prevents the whole desk from expanding!
+                                    height="115px", 
                                     align_items="flex-start",
                                     **BTN_STYLE
                                 )
@@ -506,19 +527,19 @@ def booking_widget() -> rx.Component:
                     ), ClinicState.step >= 3
                 ),
                 
-                # Step 4: Time Slots
+                # Step 4: Time Slots with Legend
                 animated_container(
                     rx.box(
                         rx.divider(margin_y="1.5em", border_color="rgba(0,0,0,0.1)"),
                         rx.vstack(
                             rx.hstack(
-                                rx.text("Available Times (08:00 - 17:00)", font_weight="500", color=TEXT_DARK),
+                                rx.text("Select a Time (08:00 - 17:00)", font_weight="500", color=TEXT_DARK),
                                 rx.spacer(),
                                 rx.hstack(rx.box(width="12px", height="12px", bg=ACTIVE_GREEN, border_radius="999px"), rx.text("Available", font_size="0.85em", color=TEXT_LIGHT), spacing="2", align_items="center"),
-                                rx.hstack(rx.box(width="12px", height="12px", bg=SOFT_YELLOW, border_radius="999px"), rx.text("Waitlist", font_size="0.85em", color=TEXT_LIGHT), spacing="2", align_items="center"),
+                                rx.hstack(rx.box(width="12px", height="12px", bg=SOFT_YELLOW, border_radius="999px"), rx.text("Waitlist Only", font_size="0.85em", color=TEXT_LIGHT), spacing="2", align_items="center"),
                                 width="100%", align_items="center"
                             ),
-                            rx.grid(rx.foreach(ClinicState.daily_schedule, lambda item: time_slot_card(item[0], item[1])), columns={"initial": "2", "sm": "3", "md": "4"}, spacing="3", width="100%"),
+                            rx.grid(rx.foreach(ClinicState.daily_schedule, time_slot_card), columns={"initial": "2", "sm": "3", "md": "4"}, spacing="3", width="100%"),
                             width="100%", spacing="4"
                         ), width="100%"
                     ), ClinicState.step >= 4
@@ -529,14 +550,13 @@ def booking_widget() -> rx.Component:
                     rx.box(
                         rx.divider(margin_y="1.5em", border_color="rgba(0,0,0,0.1)"),
                         rx.button(
-                            rx.cond(ClinicState.booking_type == "standard", "Confirm Appointment", "Join Waitlist"),
+                            "Submit Request",
                             on_click=ClinicState.submit_appointment,
                             border_radius="12px", padding="1.5em", bg=PALETTE_DARK, color="white", width="100%", box_shadow=SOFT_SHADOW, **BTN_STYLE
                         )
                     ), ClinicState.step >= 5
                 ),
                 
-                # Replaced Desk Style with an inner container style so it flows inside the main workspace
                 width="100%", bg="rgba(255, 255, 255, 0.3)", padding="3.5em", border_radius="24px", box_shadow=SOFT_SHADOW, margin_top="2em",
                 animation=FADE_UP_ANIMATION 
             )
@@ -560,7 +580,7 @@ def dashboard() -> rx.Component:
                 _hover={"bg": "rgba(0, 0, 0, 0.4)", "transform": "translateY(-2px)"}
             ),
             width="100%", padding="1.5em 3em",
-            bg=PALETTE_MID_DARK, # Distinct color separating it from the desk
+            bg=PALETTE_MID_DARK, 
             box_shadow="0 10px 30px -10px rgba(0,0,0,0.3)"
         ),
         
@@ -590,7 +610,6 @@ def dashboard() -> rx.Component:
             
             booking_widget(),
             
-            # The Glass Desk is now applied to the entire working area
             **GLASS_DESK_STYLE,
             max_width="850px", margin_top="3em" 
         ),
