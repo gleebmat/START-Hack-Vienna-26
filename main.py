@@ -286,6 +286,25 @@ def create_appointment(
         "message": "Appointment created successfully",
     }
 
+@app.get("/schedule")
+def get_schedule(date: str, doctor: str):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            # Cast to text so we can easily search by the date prefix
+            cur.execute(
+                """
+                SELECT appointment_at::text FROM appointments
+                WHERE appointment_at::text LIKE %s 
+                  AND doctor_name = %s 
+                  AND status = 'scheduled';
+                """,
+                (f"{date}%", doctor)
+            )
+            rows = cur.fetchall()
+            # Extracts the "HH:MM" portion from "YYYY-MM-DD HH:MM:SS"
+            booked_times = [str(row[0]).split()[1][:5] for row in rows]
+            
+    return {"booked_times": booked_times}
 
 @app.get("/doctors")
 def get_doctors():
