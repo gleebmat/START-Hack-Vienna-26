@@ -1,99 +1,150 @@
-# Project Name
+# Burmal Dentist
 
-One-line description of what your team built for the **Track Name** track.
+Dental appointment management system built for **START Hack Vienna '26**.
 
-A submission for **START Hack Vienna '26**, built for the case provided by
-**Case Partner**.
+The project combines a FastAPI backend, a PostgreSQL database, fonio.ai and a Reflex web combined with
+interface for patients and clinic admins. Patients can register, book available
+appointments, join a waitlist when a slot is taken, cancel bookings and many more. Clinic
+admins can monitor appointments, waitlist entries, metrics, and call activity. But the main focus is implementing ai-based call system who make our life easier!
 
----
+## Features
 
-## About
+- Patient registration and HTTP Basic authentication
+- Appointment booking by doctor, date, and time
+- Automatic waitlist handling for already-booked slots
+- Appointment and waitlist cancellation flows
+- Fonio webhook support for inbound and outbound call intake data
+- Admin dashboard for live clinic metrics and operational overview
 
-Briefly describe the problem your track addresses and what your solution does
-(2–4 sentences). Keep it understandable for someone seeing the project for the
-first time.
+## Tech Stack
 
-## The challenge
+- Python
+- FastAPI
+- PostgreSQL
+- Psycopg
+- Reflex
+- Requests / HTTPX
+- Beaver
+- ngrok
+- fonio.ai
 
-A short summary of the case you were given and the outcome you set out to achieve.
-
-## What we built
-
-- Key feature 1
-- Key feature 2
-- Key feature 3
-
-## Demo
-
-- Live demo: `<link or "run locally, see below">`
-- Screenshots / video: `<link>`
-
----
-
-## Getting started
+## Getting Started
 
 ### Prerequisites
 
-List what someone needs installed to run the project (e.g. the tools and runtimes).
+- Python 3.11 or newer
+- PostgreSQL running locally
+- A Fonio API key for call automation features
 
-### Setup
+### Backend Setup
 
-```bash
-# 1. Clone the repository
-git clone <your-repo-url>
-cd <your-repo>
 
-# 2. Configure environment
-cp .env.example .env
-# fill in the required values (see .env.example)
-
-# 3. Install / build
-# <your install/build commands here>
-```
-
-### Run
+Create and activate a virtual environment, then install dependencies:
 
 ```bash
-# <your run command here>
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-Then open `<URL>` in your browser.
+Create a local PostgreSQL database:
 
----
-
-## Project structure
-
-```
-<a short overview of the main folders/components>
+```sql
+CREATE DATABASE fonio_hackathon;
 ```
 
-## Configuration
+Create a `.env` file from the example and add your Fonio API key:
 
-Document the environment variables / settings the project needs. **Never commit
-secrets** — keep them in `.env` (which is git-ignored) and provide a `.env.example`.
+```bash
+copy .env.example .env
+```
 
-## Architecture & assumptions
+Required environment variables:
 
-A few sentences on how the pieces fit together and any assumptions you made.
+```env
+FONIO_API_KEY=your_fonio_api_key
+```
 
-## Troubleshooting
+Initialize and seed the database:
 
-- Problem → fix
-- Problem → fix
+```bash
+python database.py
+python seed_db.py
+```
 
----
+Run the FastAPI backend:
 
-## Team
+```bash
+uvicorn main:app --reload --host 127.0.0.1 --port 8080
+```
 
-- Name 1 — role
-- Name 2 — role
-- Name 3 — role
+API documentation is available at:
 
-## Submission
+```text
+http://127.0.0.1:8080/docs
+```
 
-- Track: **Track Name** · Case partner: **Case Partner**
-- Submitted to the START Hack Vienna '26 GitHub organisation.
+### Frontend Setup
+
+In a second terminal, start the Reflex app:
+
+```bash
+cd GUI
+reflex run
+```
+
+The frontend expects the backend to be available at:
+
+```text
+http://127.0.0.1:8080
+```
+
+## Demo Credentials
+
+After running `seed_db.py`, all seeded users use the password:
+
+```text
+test1234
+```
+
+Example seeded phone numbers:
+
+- `+436601111111`
+- `+436601111112`
+- `+436601111113`
+- `+436601111114`
+- `+436601111115`
+
+## Project Structure
+
+```text
+.
+|-- main.py              # FastAPI application and API routes
+|-- database.py          # Database table creation script
+|-- seed_db.py           # Demo data seeding script
+|-- requirements.txt     # Python dependencies
+|-- GUI/                 # Reflex frontend application
+|   |-- gui/gui.py       # Patient UI
+|   `-- gui/admin.py     # Admin UI
+|-- .env.example         # Environment variable template
+|-- LICENSE              # MIT license
+`-- README.md
+```
+
+## Configuration Notes
+
+Database connection settings are currently defined in `main.py`, `database.py`,
+and `seed_db.py`. The default local configuration is:
+
+```text
+host=localhost
+port=5432
+dbname=fonio_hackathon
+user=postgres
+password=1234
+```
+
 
 ## License
 
-Released under the MIT License — see [`LICENSE`](LICENSE).
+This project is released under the MIT License. See [LICENSE](LICENSE).

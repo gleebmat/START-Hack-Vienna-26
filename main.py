@@ -157,8 +157,14 @@ def _score_and_pick_next(
     scored = []
     for c in candidates:
         (
-            waitlist_id, client_id, name, phone,
-            appt_reason, appt_doctor, preferred_time, priority,
+            waitlist_id,
+            client_id,
+            name,
+            phone,
+            appt_reason,
+            appt_doctor,
+            preferred_time,
+            priority,
         ) = c
         score = 0
 
@@ -228,7 +234,9 @@ def _score_and_pick_next(
             return "calling_next", phone
 
         # Call failed — re-activate and try next
-        print(f"[FONIO] Call to {name} ({phone}) failed — re-activating and trying next")
+        print(
+            f"[FONIO] Call to {name} ({phone}) failed — re-activating and trying next"
+        )
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -463,8 +471,8 @@ def cancel_appointment(
                 "SELECT a.appointment_id, a.client_id, a.reason_of_appointment, a.appointment_at, a.doctor_name, a.status FROM appointments a WHERE a.appointment_id = %s;",
                 (appointment_id,),
             )
-            appt = cur.fetchone() 
-            
+            appt = cur.fetchone()
+
             if not appt:
                 raise HTTPException(
                     status_code=404, detail=f"Appointment {appointment_id} not found"
@@ -483,7 +491,7 @@ def cancel_appointment(
                 "UPDATE appointments SET status = 'cancelled' WHERE appointment_id = %s;",
                 (appointment_id,),
             )
-            
+
             # 3. Check for waitlist (Using the updated reason-less query)
             cur.execute(
                 "SELECT 1 FROM waitlist_entries WHERE active = TRUE AND doctor_name = %s LIMIT 1;",
@@ -599,12 +607,14 @@ async def fonio_webhook(request: Request):
         "cancelled": "no_answer",
         "voicemail": "voicemail",
         "error": "failed",
-        "fonio_error": "failed"
+        "fonio_error": "failed",
     }
 
     if disconnect in UNCONNECTED_MAP:
         outcome = UNCONNECTED_MAP[disconnect]
-        print(f"[FONIO] Unconnected call ('{disconnect}') — ignoring extractionData -> '{outcome}'")
+        print(
+            f"[FONIO] Unconnected call ('{disconnect}') — ignoring extractionData -> '{outcome}'"
+        )
     elif raw_accepted == "yes":
         outcome = "yes"
     elif raw_accepted == "no":
@@ -616,7 +626,9 @@ async def fonio_webhook(request: Request):
         print(f"[FONIO] Unexpected accepted value: '{raw_accepted}' — treating as 'no'")
         outcome = "no"
 
-    print(f"[FONIO] Raw accepted='{raw_accepted}' | disconnect='{disconnect}' | Final outcome='{outcome}'")
+    print(
+        f"[FONIO] Raw accepted='{raw_accepted}' | disconnect='{disconnect}' | Final outcome='{outcome}'"
+    )
     _log_call(to_number, doctor, reason, slot_time_db, outcome)
 
     if outcome == "yes":
@@ -634,7 +646,9 @@ async def fonio_webhook(request: Request):
                         (entry[1], reason, slot_time_db, doctor),
                     )
                 else:
-                    print(f"[FONIO] YES but no waitlist entry for {to_number}/{doctor} — REVIEW NEEDED")
+                    print(
+                        f"[FONIO] YES but no waitlist entry for {to_number}/{doctor} — REVIEW NEEDED"
+                    )
             conn.commit()
         print(f"[FONIO] Slot accepted by {to_number} — appointment booked")
         return {"status": "booked", "phone": to_number}
@@ -653,7 +667,9 @@ async def fonio_webhook(request: Request):
         return {"status": status_str}
 
     elif outcome == "callback":
-        print(f"[FONIO] {to_number} requested callback — keeping in queue, calling next")
+        print(
+            f"[FONIO] {to_number} requested callback — keeping in queue, calling next"
+        )
         with get_connection() as conn:
             with conn.cursor() as cur:
                 # 3. FIX: Removed 'AND w.reason_of_appointment = %s' here too
@@ -675,7 +691,9 @@ async def fonio_webhook(request: Request):
             reason, doctor, slot_time_db, to_number
         )
         return {
-            "status": "callback_requested_calling_next" if next_phone else "callback_requested_no_candidates",
+            "status": "callback_requested_calling_next"
+            if next_phone
+            else "callback_requested_no_candidates",
             "callback_for": to_number,
             "next_called": next_phone,
         }
