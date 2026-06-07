@@ -293,6 +293,14 @@ def get_doctors():
     return {"doctors": list(VALID_DOCTORS)}
 
 
+PRIORITIES = {1, 2, 3}
+
+
+@app.get("/priorities")
+def get_priorities():
+    return {"priorities": list(PRIORITIES)}
+
+
 # 3. LIST my active appointments — requires auth
 @app.get("/appointments/mine")
 def my_appointments(
