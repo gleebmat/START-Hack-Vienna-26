@@ -44,11 +44,25 @@ def create_tables():
     );
     """
 
+    create_call_log = """
+    CREATE TABLE IF NOT EXISTS call_log (
+        log_id      SERIAL       PRIMARY KEY,
+        client_id   INTEGER      REFERENCES clients(client_id) ON DELETE SET NULL,
+        phone       VARCHAR(50)  NOT NULL,
+        doctor_name VARCHAR(255) NOT NULL,
+        reason      VARCHAR(255) NOT NULL,
+        slot_time   VARCHAR(50),
+        outcome     VARCHAR(50)  NOT NULL,
+        logged_at   TIMESTAMP    NOT NULL DEFAULT NOW()
+    );
+    """
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(create_clients)
             cur.execute(create_appointments)
             cur.execute(create_waitlist)
+            cur.execute(create_call_log)
         conn.commit()
 
     print("Tables created successfully.")

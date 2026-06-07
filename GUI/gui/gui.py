@@ -2,6 +2,7 @@ import reflex as rx
 import requests
 import calendar
 from datetime import datetime, timedelta
+from gui.admin import admin_page, AdminState
 
 # API URL
 API_URL = "http://127.0.0.1:8080"
@@ -1021,4 +1022,5 @@ def index() -> rx.Component:
 
 
 app = rx.App(style=GLOBAL_STYLE)
-app.add_page(index, on_load=ClinicState.load_doctors)
+app.add_page(index, route="/", on_load=ClinicState.load_doctors)
+app.add_page(admin_page, route="/admin")
