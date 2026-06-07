@@ -148,6 +148,12 @@ class ClinicState(rx.State):
     my_appointments: list[dict] = []
     my_waitlist: list[dict] = []
 
+    def handle_auth_submit(self):
+        if self.auth_mode == "register":
+            return self.register_client()
+        else:
+            return self.login()
+
     def load_doctors(self):
         try:
             response = requests.get(f"{API_URL}/doctors", timeout=3)
@@ -166,11 +172,15 @@ class ClinicState(rx.State):
             print(f"Error fetching doctors: {e}")
 
     # --- Dynamic Calendar Logic ---
+    # --- Dynamic Calendar Logic ---
     def update_calendar(self):
         month_num = datetime.strptime(self.selected_month, "%B").month
         year_num = int(self.selected_year)
         num_days = calendar.monthrange(year_num, month_num)[1]
         first_weekday = calendar.monthrange(year_num, month_num)[0]
+
+        # Get today's date to compare against
+        today = datetime.now().date()
 
         days_list = []
         for _ in range(first_weekday):
@@ -179,7 +189,12 @@ class ClinicState(rx.State):
         for d in range(1, num_days + 1):
             weekday = calendar.weekday(year_num, month_num, d)
             is_sunday = weekday == 6
-            days_list.append({"day": str(d), "disabled": is_sunday})
+            
+            current_date = datetime(year_num, month_num, d).date()
+            
+            is_disabled = is_sunday or (current_date < today)
+            
+            days_list.append({"day": str(d), "disabled": is_disabled})
 
         self.calendar_days = days_list
 
@@ -226,6 +241,15 @@ class ClinicState(rx.State):
             return rx.window_alert("An unexpected error occurred.")
 
     def login(self):
+        # --- SECRET ADMIN INTERCEPT ---
+        # If they type "admin" or the admin password, send them to the portal
+        if self.phone == "admin" or self.password == "yourStrongPasswordHere":
+            # Clear the inputs so they don't stay in the state
+            self.phone = ""
+            self.password = ""
+            return rx.redirect("/admin")
+        # ------------------------------
+
         try:
             response = requests.get(
                 f"{API_URL}/appointments/mine",
@@ -347,22 +371,27 @@ class ClinicState(rx.State):
         endpoint = (
             f"/waitlist/{id}/cancel" if is_waitlist else f"/appointments/{id}/cancel"
         )
-        response = requests.post(
-            f"{API_URL}{endpoint}",
-            json={"reason": "UI Cancel"},
-            auth=(self.phone, self.password),
-        )
-        if response.status_code == 200:
-            rx.window_alert("Cancelled successfully.")
-            self.login()
-        else:
-            rx.window_alert("Could not cancel.")
-
-    def handle_auth_submit(self):
-        if self.auth_mode == "login":
-            return self.login()
-        return self.register_client()
-
+        try:
+            response = requests.post(
+                f"{API_URL}{endpoint}",
+                json={"reason": "UI Cancel"},
+                auth=(self.phone, self.password),
+                timeout=15
+            )
+            if response.status_code == 200:
+                data = response.json()
+                
+                # If it's a standard appointment and the backend triggered Fonio, alert the user
+                if not is_waitlist and data.get("fonio_called"):
+                    rx.window_alert("Cancelled successfully. Fonio is calling the next patient on the waitlist!")
+                else:
+                    rx.window_alert("Cancelled successfully.")
+                    
+                self.login() # Refresh the data
+            else:
+                rx.window_alert("Could not cancel.")
+        except Exception:
+            rx.window_alert("Connection error.")
 
 # --- UI Components ---
 def animated_container(content: rx.Component, is_visible: bool) -> rx.Component:

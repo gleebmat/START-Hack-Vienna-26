@@ -1,12 +1,14 @@
 import reflex as rx
 import requests
 from datetime import datetime
+import os
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from typing import TypedDict
 
 API_URL = "http://127.0.0.1:8080"
-ADMIN_PHONE = "admin"
-ADMIN_PASSWORD = "yourStrongPasswordHere"  # match your .env
 
 PALETTE_DARK = "#354f36"
 PALETTE_MID = "#6a8569"
@@ -89,8 +91,8 @@ class AdminState(rx.State):
 
     def login(self):
         if (
-            self.admin_input_phone == ADMIN_PHONE
-            and self.admin_input_password == ADMIN_PASSWORD
+            self.admin_input_phone == os.getenv("ADMIN_PHONE")
+            and self.admin_input_password == os.getenv("ADMIN_PASSWORD")
         ):
             self.is_logged_in = True
             self.refresh()
@@ -104,7 +106,7 @@ class AdminState(rx.State):
         try:
             live = requests.get(
                 f"{API_URL}/admin/live",
-                auth=(ADMIN_PHONE, ADMIN_PASSWORD),
+                auth=(os.getenv("ADMIN_PHONE"), os.getenv("ADMIN_PASSWORD")),
                 timeout=5,
             ).json()
             self.active_waitlist = live.get("active_waitlist", [])
@@ -113,7 +115,7 @@ class AdminState(rx.State):
 
             m = requests.get(
                 f"{API_URL}/admin/metrics",
-                auth=(ADMIN_PHONE, ADMIN_PASSWORD),
+                auth=(os.getenv("ADMIN_PHONE"), os.getenv("ADMIN_PASSWORD")),
                 timeout=5,
             ).json()
             self.recovered = m.get("recovered", 0)
