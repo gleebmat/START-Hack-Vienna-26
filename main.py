@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, field_validator
@@ -9,14 +9,15 @@ import os
 import httpx
 from dotenv import load_dotenv
 
-
 load_dotenv()
 app = FastAPI(title="Dental clinic system")
 security = HTTPBasic()
 
-
 # ── Configuration ──────────────────────────────────────────────
 FONIO_API_KEY = os.environ.get("FONIO_API_KEY")
+
+if not FONIO_API_KEY:
+    raise RuntimeError("FONIO_API_KEY is not set — check your .env file")
 
 
 # ── DB connection ──────────────────────────────────────────────
@@ -64,9 +65,9 @@ def require_client(
 def trigger_fonio_call(candidate: dict, cancelled_appointment: dict):
     raw_time = cancelled_appointment["appointment_at"]
     try:
-        human_time = datetime.strptime(raw_time, "%Y-%m-%d %H:%M:%S").strftime(
-            "%B %d at %I:%M %p"
-        )
+        human_time = datetime.strptime(
+            raw_time.split(".")[0], "%Y-%m-%d %H:%M:%S"
+        ).strftime("%B %d at %I:%M %p")
     except ValueError:
         human_time = raw_time
 
@@ -82,10 +83,10 @@ def trigger_fonio_call(candidate: dict, cancelled_appointment: dict):
             "slot_time_db": raw_time,
         },
     }
-    try:  # ← payload IS used here
+    try:
         response = httpx.post(
             "https://app.fonio.ai/api/public/v1/outbound_call",
-            json=payload,  # ← right here
+            json=payload,
             headers={"Authorization": f"Bearer {FONIO_API_KEY}"},
             timeout=10,
         )
@@ -95,11 +96,77 @@ def trigger_fonio_call(candidate: dict, cancelled_appointment: dict):
         return response.json()
     except Exception as e:
         print(f"[FONIO] ERROR — call failed: {e}")
-        return {
-            "error": str(e)
-        }  # ── Request models ─────────────────────────────────────────────
+        return {"error": str(e)}
 
 
+# ── Move to next waitlist candidate ────────────────────────────
+def _move_to_next(reason: str, doctor: str, slot_time_db: str, skip_phone: str):
+    """
+    Finds next active waitlist candidate (excluding skip_phone),
+    deactivates their entry, fires Fonio call.
+    Returns (status_string, next_phone_or_None).
+    """
+    next_candidate = None
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT w.waitlist_id, c.client_id, c.name, c.phone,
+                       w.reason_of_appointment, w.doctor_name, w.preferred_time
+                FROM waitlist_entries w
+                JOIN clients c ON c.client_id = w.client_id
+                WHERE w.active = TRUE
+                  AND c.phone != %s
+                  AND w.doctor_name = %s
+                  AND w.reason_of_appointment = %s
+                ORDER BY w.priority DESC NULLS LAST, w.preferred_time ASC
+                LIMIT 1;
+                """,
+                (skip_phone, doctor, reason),
+            )
+            next_candidate = cur.fetchone()
+
+            if next_candidate:
+                cur.execute(
+                    "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
+                    (next_candidate[0],),
+                )
+        if next_candidate:
+            conn.commit()
+
+    if not next_candidate:
+        print("[FONIO] No more candidates — slot remains open")
+        return "no_more_candidates", None
+
+    next_person = {"phone": next_candidate[3], "name": next_candidate[2]}
+    fonio_result = trigger_fonio_call(
+        candidate=next_person,
+        cancelled_appointment={
+            "reason_of_appointment": reason,
+            "appointment_at": slot_time_db,
+            "doctor_name": doctor,
+        },
+    )
+
+    if "error" in fonio_result:
+        print(
+            f"[FONIO] ⚠️ Call to next candidate failed — re-activating {next_candidate[0]}"
+        )
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE waitlist_entries SET active = TRUE WHERE waitlist_id = %s;",
+                    (next_candidate[0],),
+                )
+            conn.commit()
+        return "fonio_error", None
+
+    print(f"[FONIO] Moving to next: {next_person['name']} {next_person['phone']}")
+    return "calling_next", next_person["phone"]
+
+
+# ── Request models ─────────────────────────────────────────────
 class NewClient(BaseModel):
     name: str
     phone: str
@@ -121,8 +188,7 @@ class NewClient(BaseModel):
         return v
 
 
-# priority removed — waitlist-only, always defaulted to 1 by DB
-VALID_DOCTORS = {"Dr. J Pork", "Dr. James", "Dr. Mike"}
+VALID_DOCTORS = ["Dr. J Pork", "Dr. James", "Dr. Mike"]
 
 
 class NewAppointment(BaseModel):
@@ -223,7 +289,6 @@ def create_appointment(
                         detail="This slot is taken and you are already on the waitlist for this treatment with this doctor.",
                     )
 
-                # FIX: pass 1 (DB default) — column is NOT NULL, cannot insert NULL
                 cur.execute(
                     """
                     INSERT INTO waitlist_entries
@@ -287,42 +352,39 @@ def create_appointment(
     }
 
 
+# 3. GET booked times for a date+doctor — open, no auth
 @app.get("/schedule")
 def get_schedule(date: str, doctor: str):
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # Cast to text so we can easily search by the date prefix
             cur.execute(
                 """
                 SELECT appointment_at::text FROM appointments
-                WHERE appointment_at::text LIKE %s 
-                  AND doctor_name = %s 
+                WHERE appointment_at::text LIKE %s
+                  AND doctor_name = %s
                   AND status = 'scheduled';
                 """,
                 (f"{date}%", doctor),
             )
             rows = cur.fetchall()
-            # Extracts the "HH:MM" portion from "YYYY-MM-DD HH:MM:SS"
             booked_times = [str(row[0]).split()[1][:5] for row in rows]
 
     return {"booked_times": booked_times}
 
 
+# 4. GET doctors list — open
 @app.get("/doctors")
 def get_doctors():
-    # Convert the set to a list so it can be sent as JSON
-    return {"doctors": list(VALID_DOCTORS)}
+    return {"doctors": VALID_DOCTORS}
 
 
-PRIORITIES = {1, 2, 3}
-
-
+# 5. GET priorities list — open
 @app.get("/priorities")
 def get_priorities():
-    return {"priorities": list(PRIORITIES)}
+    return {"priorities": [1, 2, 3]}
 
 
-# 3. LIST my active appointments — requires auth
+# 6. LIST my appointments + waitlist — requires auth
 @app.get("/appointments/mine")
 def my_appointments(
     client: dict = Depends(require_client),
@@ -386,14 +448,15 @@ def my_appointments(
     }
 
 
-# 4. CANCEL appointment — requires auth, triggers fonio if waitlist exists
+# 7. CANCEL appointment — requires auth, triggers Fonio if waitlist exists
 @app.post("/appointments/{appointment_id}/cancel")
 def cancel_appointment(
     appointment_id: int,
     payload: CancelRequest,
     client: dict = Depends(require_client),
 ):
-    top_candidate = None  # safe initialization
+    top_candidate = None
+    fonio_success = False
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -460,7 +523,12 @@ def cancel_appointment(
                 "doctor_name": appt[4],
             },
         )
-        if "error" in fonio_result:
+        if "error" not in fonio_result:
+            fonio_success = True
+        else:
+            print(
+                f"[FONIO] ⚠️ Call failed — re-activating waitlist entry {top_candidate[0]}"
+            )
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -477,11 +545,11 @@ def cancel_appointment(
             "appointment_at": str(appt[3]),
             "doctor_name": appt[4],
         },
-        "fonio_called": top_candidate is not None,
+        "fonio_called": fonio_success,
     }
 
 
-# 5. CANCEL waitlist entry — requires auth
+# 8. CANCEL waitlist entry — requires auth
 @app.post("/waitlist/{waitlist_id}/cancel")
 def cancel_waitlist_entry(
     waitlist_id: int,
@@ -501,8 +569,7 @@ def cancel_waitlist_entry(
 
             if not entry:
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Waitlist entry {waitlist_id} not found",
+                    status_code=404, detail=f"Waitlist entry {waitlist_id} not found"
                 )
             if entry[1] != client["client_id"]:
                 raise HTTPException(
@@ -511,8 +578,7 @@ def cancel_waitlist_entry(
                 )
             if not entry[5]:
                 raise HTTPException(
-                    status_code=400,
-                    detail="This waitlist entry is already inactive",
+                    status_code=400, detail="This waitlist entry is already inactive"
                 )
 
             cur.execute(
@@ -532,7 +598,7 @@ def cancel_waitlist_entry(
     }
 
 
-# 6. DELETE my account — removes client + all data via CASCADE
+# 9. DELETE my account — removes client + all data via CASCADE
 @app.delete("/clients/me", status_code=200)
 def delete_client(
     client: dict = Depends(require_client),
@@ -555,20 +621,32 @@ def delete_client(
     }
 
 
-# 7. FONIO WEBHOOK
+# 10. FONIO WEBHOOK — called by Fonio after each outbound call ends
 @app.post("/webhooks/fonio", include_in_schema=False)
 async def fonio_webhook(request: Request):
     data = await request.json()
-
-    outcome = data.get("extractionData", {}).get("accepted", "unknown")
     to_number = data.get("toNumber", "")
     context = data.get("context", {})
     reason = context.get("reason", "")
     slot_time_db = context.get("slot_time_db", "")
     doctor = context.get("doctor", "")
-
-    print(f"[FONIO] Call ended. Number: {to_number} | Outcome: {outcome}")
-
+    outcome = data.get("extractionData", {}).get("accepted")
+    if outcome is None:
+        disconnect = data.get("disconnectReason", "unknown")
+        # Map Fonio disconnect reasons to your outcome strings
+        disconnect_map = {
+            "dial_busy": "busy",
+            "dial_no_answer": "no_answer",
+            "dial_failed": "failed",
+            "voicemail": "voicemail",
+            "dial_cancel": "no_answer",
+            "error": "failed",
+        }
+        outcome = disconnect_map.get(disconnect, "unknown")
+        print(
+            f"[FONIO] accepted=None — mapped disconnectReason '{disconnect}' → outcome '{outcome}'"
+        )
+    # ── YES: patient accepted the slot ─────────────────────────
     if outcome == "yes":
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -598,71 +676,78 @@ async def fonio_webhook(request: Request):
                         """,
                         (entry[1], reason, slot_time_db, doctor),
                     )
+                    cur.execute(
+                        "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
+                        (entry[0],),
+                    )
+                else:
+                    print(
+                        f"[FONIO] ⚠️ YES received but no waitlist entry found for {to_number} / {doctor} / {reason} — REVIEW NEEDED"
+                    )
+
             conn.commit()
 
         print(f"[FONIO] Slot accepted by {to_number} — appointment booked")
         return {"status": "booked", "phone": to_number}
 
+    # ── NO or VOICEMAIL: move to next candidate ─────────────────
     elif outcome in ("no", "voicemail"):
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT w.waitlist_id, c.client_id, c.name, c.phone,
-                           w.reason_of_appointment, w.doctor_name, w.preferred_time
-                    FROM waitlist_entries w
-                    JOIN clients c ON c.client_id = w.client_id
-                    WHERE w.active = TRUE
-                      AND c.phone != %s
-                      AND w.doctor_name = %s
-                      AND w.reason_of_appointment = %s
-                    ORDER BY w.priority DESC NULLS LAST, w.preferred_time ASC
-                    LIMIT 1;
-                    """,
-                    (to_number, doctor, reason),
-                )
-                next_candidate = cur.fetchone()
-
-                if next_candidate:
-                    cur.execute(
-                        "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
-                        (next_candidate[0],),
-                    )
-            if next_candidate:
-                conn.commit()
-
-        if next_candidate:
-            next_person = {"phone": next_candidate[3], "name": next_candidate[2]}
-            fonio_result = trigger_fonio_call(
-                candidate=next_person,
-                cancelled_appointment={
-                    "reason_of_appointment": reason,
-                    "appointment_at": slot_time_db,
-                    "doctor_name": doctor,
-                },
-            )
-            if "error" in fonio_result:
-                with get_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE waitlist_entries SET active = TRUE WHERE waitlist_id = %s;",
-                            (next_candidate[0],),
-                        )
-                    conn.commit()
-
-            print(
-                f"[FONIO] Moving to next: {next_person['name']} {next_person['phone']}"
-            )
+        status_str, next_phone = _move_to_next(reason, doctor, slot_time_db, to_number)
+        if next_phone:
             return {
                 "status": "calling_next_after_voicemail"
                 if outcome == "voicemail"
                 else "calling_next",
-                "next": next_person["phone"],
+                "next": next_phone,
             }
-        else:
-            print("[FONIO] No more candidates — slot remains open")
-            return {"status": "no_more_candidates"}
+        return {"status": status_str}
 
+    # ── CALLBACK: re-activate their entry, call next in parallel ─
+    elif outcome == "callback":
+        print(
+            f"[FONIO] {to_number} requested callback — keeping in queue, calling next"
+        )
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE waitlist_entries
+                    SET active = TRUE
+                    FROM clients c
+                    WHERE waitlist_entries.client_id = c.client_id
+                      AND c.phone = %s
+                      AND waitlist_entries.doctor_name = %s
+                      AND waitlist_entries.reason_of_appointment = %s
+                      AND waitlist_entries.active = FALSE;
+                    """,
+                    (to_number, doctor, reason),
+                )
+            conn.commit()
+
+        status_str, next_phone = _move_to_next(reason, doctor, slot_time_db, to_number)
+        return {
+            "status": "callback_requested_calling_next",
+            "callback_for": to_number,
+            "next_called": next_phone,
+        }
+
+    # ── NO ANSWER / BUSY / FAILED: move to next candidate ───────
+    elif outcome in ("no_answer", "busy", "failed"):
+        print(f"[FONIO] Outcome '{outcome}' for {to_number} — moving to next candidate")
+        status_str, next_phone = _move_to_next(reason, doctor, slot_time_db, to_number)
+        if next_phone:
+            return {"status": f"calling_next_after_{outcome}", "next": next_phone}
+        return {"status": status_str}
+
+    # ── UNKNOWN: log full payload for human review ───────────────
     else:
-        print(f"[FONIO] Unknown outcome: {outcome}")
-        return {"status": "unknown_outcome", "raw": data}
+        print(f"[FONIO] ⚠️ UNKNOWN outcome: '{outcome}' — HUMAN REVIEW NEEDED")
+        print(f"[FONIO] Full payload: {data}")
+        return {
+            "status": "unknown_outcome_needs_review",
+            "outcome_received": outcome,
+            "slot": slot_time_db,
+            "doctor": doctor,
+            "reason": reason,
+            "phone": to_number,
+        }
