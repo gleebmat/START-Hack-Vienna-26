@@ -9,7 +9,7 @@ admins can monitor appointments, waitlist entries, metrics, and call activity. B
 
 ## Features
 
-- Patient registration and HTTP Basic authentication (Beaver)
+- Patient registration and HTTP Basic authentication
 - Appointment booking by doctor, date, and time
 - Automatic waitlist handling for already-booked slots
 - Appointment and waitlist cancellation flows
@@ -24,6 +24,9 @@ admins can monitor appointments, waitlist entries, metrics, and call activity. B
 - Psycopg
 - Reflex
 - Requests / HTTPX
+- Beaver
+- ngrok
+- fonio.ai
 
 ## Getting Started
 
@@ -34,6 +37,7 @@ admins can monitor appointments, waitlist entries, metrics, and call activity. B
 - A Fonio API key for call automation features
 
 ### Backend Setup
+
 
 Create and activate a virtual environment, then install dependencies:
 
@@ -137,10 +141,9 @@ host=localhost
 port=5432
 dbname=fonio_hackathon
 user=postgres
-password=7007
+password=1234
 ```
 
-Do not commit real secrets. Keep local credentials and API keys in `.env`.
 
 ## License
 
