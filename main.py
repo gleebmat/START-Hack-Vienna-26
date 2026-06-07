@@ -287,6 +287,12 @@ def create_appointment(
     }
 
 
+@app.get("/doctors")
+def get_doctors():
+    # Convert the set to a list so it can be sent as JSON
+    return {"doctors": list(VALID_DOCTORS)}
+
+
 # 3. LIST my active appointments — requires auth
 @app.get("/appointments/mine")
 def my_appointments(
