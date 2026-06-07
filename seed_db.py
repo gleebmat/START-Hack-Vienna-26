@@ -8,7 +8,7 @@ def get_connection():
         port=5432,
         dbname="fonio_hackathon",
         user="postgres",
-        password="7007",
+        password="1234",
     )
 
 
