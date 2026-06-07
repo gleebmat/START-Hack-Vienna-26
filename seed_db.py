@@ -69,8 +69,6 @@ def seed():
             print("Appointments inserted.")
 
             # ── 4. Insert waitlist entries ─────────────────────────────
-            # Sofia (priority 2) gets called first when Anna cancels.
-            # If Sofia declines, Mia (priority 1) gets called next.
             cur.execute(
                 """
                 INSERT INTO waitlist_entries
@@ -90,7 +88,36 @@ def seed():
             )
             print("Waitlist entries inserted.")
 
+            # ── 5. Insert call_log examples ────────────────────────────
+            cur.execute(
+                """
+                INSERT INTO call_log
+                    (client_id, phone, doctor_name, reason, slot_time, outcome, logged_at)
+                VALUES
+                    (%s, '+436601111113', 'Dr. Mike',   'Dental cleaning', '2026-06-08 10:00:00', 'yes',       '2026-06-07 09:00:00'),
+                    (%s, '+436601111115', 'Dr. Mike',   'Dental cleaning', '2026-06-08 10:00:00', 'no',        '2026-06-07 09:03:00'),
+                    (%s, '+436601111112', 'Dr. J Pork', 'Check-up',        '2026-06-09 09:00:00', 'voicemail', '2026-06-07 09:10:00'),
+                    (%s, '+436601111114', 'Dr. James',  'Tooth filling',   '2026-06-09 11:00:00', 'yes',       '2026-06-07 09:15:00'),
+                    (%s, '+436601111111', 'Dr. Mike',   'Teeth whitening', '2026-06-10 14:00:00', 'no',        '2026-06-07 09:20:00'),
+                    (%s, '+436601111113', 'Dr. James',  'Root canal',      '2026-06-10 15:00:00', 'yes',       '2026-06-07 09:25:00'),
+                    (%s, '+436601111115', 'Dr. J Pork', 'Check-up',        '2026-06-11 10:00:00', 'voicemail', '2026-06-07 09:30:00'),
+                    (%s, '+436601111112', 'Dr. Mike',   'Dental cleaning', '2026-06-11 11:00:00', 'yes',       '2026-06-07 09:35:00');
+                """,
+                (
+                    id_of["Sofia Gruber"],
+                    id_of["Mia Novak"],
+                    id_of["Lukas Weber"],
+                    id_of["David Steiner"],
+                    id_of["Anna Müller"],
+                    id_of["Sofia Gruber"],
+                    id_of["Mia Novak"],
+                    id_of["Lukas Weber"],
+                ),
+            )
+            print("Call log entries inserted.")
+
         conn.commit()
+
     print("\n✅ All seed data inserted successfully.")
     print("\nTest credentials (all passwords: test1234):")
     print("  Anna Müller   → phone: +436601111111")

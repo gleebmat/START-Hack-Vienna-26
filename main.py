@@ -28,7 +28,7 @@ def get_connection():
         port=5432,
         dbname="fonio_hackathon",
         user="postgres",
-        password="7007",
+        password="1234",
     )
 
 
@@ -119,11 +119,6 @@ def _log_call(phone: str, doctor: str, reason: str, slot_time: str, outcome: str
 def _score_and_pick_next(
     reason: str, doctor: str, slot_time_db: str, skip_phone: str
 ) -> tuple:
-    """
-    Scores waitlist candidates and calls the best one.
-    Uses only existing DB columns — no schema changes to waitlist_entries.
-    Factors: priority(30) + time_match(25) + treatment_baseline(20) + contact_history(15) + fairness_by_id(10)
-    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -133,9 +128,9 @@ def _score_and_pick_next(
                 FROM waitlist_entries w
                 JOIN clients c ON c.client_id = w.client_id
                 WHERE w.active = TRUE AND c.phone != %s
-                  AND w.doctor_name = %s AND w.reason_of_appointment = %s;
+                  AND w.doctor_name = %s;
                 """,
-                (skip_phone, doctor, reason),
+                (skip_phone, doctor),
             )
             candidates = cur.fetchall()
 
@@ -146,8 +141,8 @@ def _score_and_pick_next(
             phones = [c[3] for c in candidates]
             placeholders = ",".join(["%s"] * len(phones))
             cur.execute(
-                f"SELECT phone, COUNT(*) FROM call_log WHERE phone IN ({placeholders}) AND doctor_name = %s AND reason = %s AND outcome != 'yes' GROUP BY phone;",
-                (*phones, doctor, reason),
+                f"SELECT phone, COUNT(*) FROM call_log WHERE phone IN ({placeholders}) AND doctor_name = %s AND outcome != 'yes' GROUP BY phone;",
+                (*phones, doctor),
             )
             attempt_counts = {row[0]: row[1] for row in cur.fetchall()}
             min_wid = min(c[0] for c in candidates)
@@ -158,6 +153,7 @@ def _score_and_pick_next(
     except ValueError:
         slot_dt = None
 
+    # ── Score ALL candidates and sort ─────────────────────────
     scored = []
     for c in candidates:
         (
@@ -172,10 +168,8 @@ def _score_and_pick_next(
         ) = c
         score = 0
 
-        # Priority
         score += (priority / 3) * 30
 
-        # Time preference match
         time_score = 0
         if slot_dt and preferred_time:
             try:
@@ -199,14 +193,11 @@ def _score_and_pick_next(
                 pass
         score += time_score
 
-        # Treatment match baseline
         score += 20
 
-        # Contact history
         attempts = attempt_counts.get(phone, 0)
         score += max(0, 15 - (attempts * 5))
 
-        # Fairness via waitlist_id proxy
         id_range = max_wid - min_wid if max_wid != min_wid else 1
         score += ((max_wid - waitlist_id) / id_range) * 10
 
@@ -214,38 +205,49 @@ def _score_and_pick_next(
         print(f"[SCORE] {name} ({phone}): {score:.1f} pts")
 
     scored.sort(key=lambda x: (-x[0], x[1]))
-    best_score, best_wid, best_name, best_phone = scored[0]
-    print(f"[DISPATCHER] -> {best_name} ({best_phone}) score={best_score:.1f}")
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
-                (best_wid,),
-            )
-        conn.commit()
+    # ── Try each candidate in order until one call succeeds ───
+    for score, wid, name, phone in scored:
+        print(f"[DISPATCHER] Trying {name} ({phone}) score={score:.1f}")
 
-    fonio_result = trigger_fonio_call(
-        candidate={"phone": best_phone, "name": best_name},
-        cancelled_appointment={
-            "reason_of_appointment": reason,
-            "appointment_at": slot_time_db,
-            "doctor_name": doctor,
-        },
-    )
+        # Deactivate this candidate
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE waitlist_entries SET active = FALSE WHERE waitlist_id = %s;",
+                    (wid,),
+                )
+            conn.commit()
 
-    if "error" in fonio_result:
-        print(f"[FONIO] Call failed — re-activating {best_wid}")
+        fonio_result = trigger_fonio_call(
+            candidate={"phone": phone, "name": name},
+            cancelled_appointment={
+                "reason_of_appointment": reason,
+                "appointment_at": slot_time_db,
+                "doctor_name": doctor,
+            },
+        )
+
+        if "error" not in fonio_result:
+            # Call succeeded — done
+            print(f"[DISPATCHER] ✓ Call placed to {name} ({phone})")
+            return "calling_next", phone
+
+        # Call failed — re-activate and try next
+        print(
+            f"[FONIO] Call to {name} ({phone}) failed — re-activating and trying next"
+        )
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE waitlist_entries SET active = TRUE WHERE waitlist_id = %s;",
-                    (best_wid,),
+                    (wid,),
                 )
             conn.commit()
-        return "fonio_error", None
 
-    return "calling_next", best_phone
+    # All candidates exhausted
+    print("[FONIO] All candidates tried — no successful call placed")
+    return "fonio_error_all_failed", None
 
 
 # ── Models ─────────────────────────────────────────────────────
@@ -464,11 +466,13 @@ def cancel_appointment(
 
     with get_connection() as conn:
         with conn.cursor() as cur:
+            # 1. Fetch the appointment FIRST so 'appt' exists
             cur.execute(
                 "SELECT a.appointment_id, a.client_id, a.reason_of_appointment, a.appointment_at, a.doctor_name, a.status FROM appointments a WHERE a.appointment_id = %s;",
                 (appointment_id,),
             )
             appt = cur.fetchone()
+
             if not appt:
                 raise HTTPException(
                     status_code=404, detail=f"Appointment {appointment_id} not found"
@@ -482,17 +486,21 @@ def cancel_appointment(
                     status_code=400, detail="Appointment is already cancelled"
                 )
 
+            # 2. Update status to cancelled
             cur.execute(
                 "UPDATE appointments SET status = 'cancelled' WHERE appointment_id = %s;",
                 (appointment_id,),
             )
+
+            # 3. Check for waitlist (Using the updated reason-less query)
             cur.execute(
-                "SELECT 1 FROM waitlist_entries WHERE active = TRUE AND doctor_name = %s AND reason_of_appointment = %s LIMIT 1;",
-                (appt[4], appt[2]),
+                "SELECT 1 FROM waitlist_entries WHERE active = TRUE AND doctor_name = %s LIMIT 1;",
+                (appt[4],),
             )
             has_waitlist = cur.fetchone() is not None
         conn.commit()
 
+    # 4. Trigger Fonio if there's someone on the waitlist
     if has_waitlist:
         status_str, called_phone = _score_and_pick_next(
             reason=appt[2],
@@ -579,29 +587,57 @@ async def fonio_webhook(request: Request):
     slot_time_db = context.get("slot_time_db", "")
     doctor = context.get("doctor", "")
 
-    outcome = data.get("extractionData", {}).get("accepted")
-    if outcome is None:
-        disconnect = data.get("disconnectReason", "unknown")
-        outcome = {
-            "dial_busy": "busy",
-            "dial_no_answer": "no_answer",
-            "dial_failed": "failed",
-            "voicemail": "voicemail",
-            "dial_cancel": "no_answer",
-            "error": "failed",
-            "fonio_error": "failed",
-        }.get(disconnect, "unknown")
-        print(f"[FONIO] accepted=None — mapped '{disconnect}' -> '{outcome}'")
+    # 1. FIX: Safely parse extractionData to prevent the AttributeError crash
+    extraction_data = data.get("extractionData") or {}
+    raw_accepted = extraction_data.get("accepted")
 
-    print(f"[FONIO] Call ended. Number: {to_number} | Outcome: {outcome}")
+    # 2. FIX: Normalize the disconnect reason to catch all variations of no-answer
+    disconnect = str(data.get("disconnectReason") or "").lower().replace("-", "_")
+
+    UNCONNECTED_MAP = {
+        "dial_no_answer": "no_answer",
+        "no_answer": "no_answer",
+        "dial_busy": "busy",
+        "busy": "busy",
+        "dial_failed": "failed",
+        "failed": "failed",
+        "dial_cancel": "no_answer",
+        "cancel": "no_answer",
+        "canceled": "no_answer",
+        "cancelled": "no_answer",
+        "voicemail": "voicemail",
+        "error": "failed",
+        "fonio_error": "failed",
+    }
+
+    if disconnect in UNCONNECTED_MAP:
+        outcome = UNCONNECTED_MAP[disconnect]
+        print(
+            f"[FONIO] Unconnected call ('{disconnect}') — ignoring extractionData -> '{outcome}'"
+        )
+    elif raw_accepted == "yes":
+        outcome = "yes"
+    elif raw_accepted == "no":
+        outcome = "no"
+    elif raw_accepted is None:
+        outcome = "unknown"
+        print(f"[FONIO] accepted=None, no disconnect reason — treating as unknown")
+    else:
+        print(f"[FONIO] Unexpected accepted value: '{raw_accepted}' — treating as 'no'")
+        outcome = "no"
+
+    print(
+        f"[FONIO] Raw accepted='{raw_accepted}' | disconnect='{disconnect}' | Final outcome='{outcome}'"
+    )
     _log_call(to_number, doctor, reason, slot_time_db, outcome)
 
     if outcome == "yes":
         with get_connection() as conn:
             with conn.cursor() as cur:
+                # 3. FIX: Removed 'AND w.reason_of_appointment = %s'
                 cur.execute(
-                    "SELECT w.waitlist_id, w.client_id FROM waitlist_entries w JOIN clients c ON c.client_id = w.client_id WHERE c.phone = %s AND w.active = FALSE AND w.doctor_name = %s AND w.reason_of_appointment = %s ORDER BY w.waitlist_id DESC LIMIT 1;",
-                    (to_number, doctor, reason),
+                    "SELECT w.waitlist_id, w.client_id FROM waitlist_entries w JOIN clients c ON c.client_id = w.client_id WHERE c.phone = %s AND w.active = FALSE AND w.doctor_name = %s ORDER BY w.waitlist_id DESC LIMIT 1;",
+                    (to_number, doctor),
                 )
                 entry = cur.fetchone()
                 if entry:
@@ -611,7 +647,7 @@ async def fonio_webhook(request: Request):
                     )
                 else:
                     print(
-                        f"[FONIO] YES but no waitlist entry for {to_number}/{doctor}/{reason} — REVIEW NEEDED"
+                        f"[FONIO] YES but no waitlist entry for {to_number}/{doctor} — REVIEW NEEDED"
                     )
             conn.commit()
         print(f"[FONIO] Slot accepted by {to_number} — appointment booked")
@@ -636,21 +672,33 @@ async def fonio_webhook(request: Request):
         )
         with get_connection() as conn:
             with conn.cursor() as cur:
+                # 3. FIX: Removed 'AND w.reason_of_appointment = %s' here too
                 cur.execute(
-                    "UPDATE waitlist_entries SET active = TRUE FROM clients c WHERE waitlist_entries.client_id = c.client_id AND c.phone = %s AND waitlist_entries.doctor_name = %s AND waitlist_entries.reason_of_appointment = %s AND waitlist_entries.active = FALSE;",
-                    (to_number, doctor, reason),
+                    """
+                    UPDATE waitlist_entries SET active = TRUE
+                    WHERE waitlist_id = (
+                        SELECT w.waitlist_id FROM waitlist_entries w
+                        JOIN clients c ON c.client_id = w.client_id
+                        WHERE c.phone = %s AND w.doctor_name = %s
+                          AND w.active = FALSE
+                        ORDER BY w.waitlist_id DESC LIMIT 1
+                    );
+                    """,
+                    (to_number, doctor),
                 )
             conn.commit()
         status_str, next_phone = _score_and_pick_next(
             reason, doctor, slot_time_db, to_number
         )
         return {
-            "status": "callback_requested_calling_next",
+            "status": "callback_requested_calling_next"
+            if next_phone
+            else "callback_requested_no_candidates",
             "callback_for": to_number,
             "next_called": next_phone,
         }
 
-    elif outcome in ("no_answer", "busy", "failed"):
+    elif outcome in ("no_answer", "busy", "failed", "unknown"):
         print(f"[FONIO] '{outcome}' for {to_number} — moving to next candidate")
         status_str, next_phone = _score_and_pick_next(
             reason, doctor, slot_time_db, to_number
@@ -660,7 +708,7 @@ async def fonio_webhook(request: Request):
         return {"status": status_str}
 
     else:
-        print(f"[FONIO] UNKNOWN outcome: '{outcome}' — HUMAN REVIEW NEEDED\n{data}")
+        print(f"[FONIO] UNKNOWN outcome: '{outcome}' — HUMAN REVIEW NEEDED")
         return {
             "status": "unknown_outcome_needs_review",
             "outcome_received": outcome,
