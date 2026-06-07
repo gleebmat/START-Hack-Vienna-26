@@ -19,7 +19,6 @@ def hash_password(password: str) -> str:
 def seed():
     with get_connection() as conn:
         with conn.cursor() as cur:
-
             # ── 1. Insert clients ──────────────────────────────────────
             password = hash_password("test1234")
             cur.execute(
