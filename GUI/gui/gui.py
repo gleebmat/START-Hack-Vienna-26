@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from gui.admin import admin_page, AdminState
 
 # API URL
-API_URL = "http://127.0.0.1:8080"
+API_URL = "https://ambiguous-unfasten-operation.ngrok-free.dev"
 
 # --- Green Color Palette ---
 PALETTE_DARK = "#354f36"
@@ -189,11 +189,11 @@ class ClinicState(rx.State):
         for d in range(1, num_days + 1):
             weekday = calendar.weekday(year_num, month_num, d)
             is_sunday = weekday == 6
-            
+
             current_date = datetime(year_num, month_num, d).date()
-            
+
             is_disabled = is_sunday or (current_date < today)
-            
+
             days_list.append({"day": str(d), "disabled": is_disabled})
 
         self.calendar_days = days_list
@@ -376,22 +376,25 @@ class ClinicState(rx.State):
                 f"{API_URL}{endpoint}",
                 json={"reason": "UI Cancel"},
                 auth=(self.phone, self.password),
-                timeout=15
+                timeout=15,
             )
             if response.status_code == 200:
                 data = response.json()
-                
+
                 # If it's a standard appointment and the backend triggered Fonio, alert the user
                 if not is_waitlist and data.get("fonio_called"):
-                    rx.window_alert("Cancelled successfully. Fonio is calling the next patient on the waitlist!")
+                    rx.window_alert(
+                        "Cancelled successfully. Fonio is calling the next patient on the waitlist!"
+                    )
                 else:
                     rx.window_alert("Cancelled successfully.")
-                    
-                self.login() # Refresh the data
+
+                self.login()  # Refresh the data
             else:
                 rx.window_alert("Could not cancel.")
         except Exception:
             rx.window_alert("Connection error.")
+
 
 # --- UI Components ---
 def animated_container(content: rx.Component, is_visible: bool) -> rx.Component:
