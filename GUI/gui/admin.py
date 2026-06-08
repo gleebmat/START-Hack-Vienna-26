@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from typing import TypedDict
@@ -90,10 +91,9 @@ class AdminState(rx.State):
         self.admin_input_password = v
 
     def login(self):
-        if (
-            self.admin_input_phone == os.getenv("ADMIN_PHONE")
-            and self.admin_input_password == os.getenv("ADMIN_PASSWORD")
-        ):
+        if self.admin_input_phone == os.getenv(
+            "ADMIN_PHONE"
+        ) and self.admin_input_password == os.getenv("ADMIN_PASSWORD"):
             self.is_logged_in = True
             self.refresh()
         else:
